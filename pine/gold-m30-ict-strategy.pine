@@ -1,0 +1,306 @@
+//@version=6
+strategy("Gold M30 Trend+ICT Strategy", shorttitle="GoldM30ICT", overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent,
+     commission_value=0.03,
+     slippage=3)
+
+// ============================================================
+// Task 1: 输入参数 + M30 EMA/ATR
+// ============================================================
+
+// ---- EMA ----
+emaFastLen = input.int(20, "M30 EMA Fast", group="EMA")
+emaSlowLen = input.int(50, "M30 EMA Slow", group="EMA")
+h4EmaLen   = input.int(50, "H4 EMA", group="EMA")
+
+// ---- ATR / 风险 ----
+atrLen           = input.int(14, "ATR Length", group="ATR/Risk")
+slAtrMult        = input.float(1.5, "SL ATR Multiple", group="ATR/Risk")
+tpAtrMult        = input.float(3.0, "TP ATR Multiple", group="ATR/Risk")
+pullbackAtrMult  = input.float(0.3, "回调容差 (x ATR)", group="ATR/Risk")
+riskPct          = input.float(1.0, "单笔风险 % of equity", group="ATR/Risk")
+
+// ---- M30 EMA / ATR 计算 ----
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atrVal  = ta.atr(atrLen)
+
+bullStack = emaFast > emaSlow
+bearStack = emaFast < emaSlow
+
+plot(emaFast, "EMA Fast", color=color.blue)
+plot(emaSlow, "EMA Slow", color=color.orange)
+
+// ============================================================
+// Task 2: H4 方向判断（EMA50 + BOS/CHoCH，任一支持即可）
+// ============================================================
+
+h4SwingLookback = input.int(5, "H4 BOS/CHoCH 摆动点回看根数", group="Direction")
+
+// H4 EMA 方向
+h4Close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+h4Ema   = request.security(syminfo.tickerid, "240", ta.ema(close, h4EmaLen), lookahead=barmerge.lookahead_off)
+
+h4EmaBull = h4Close > h4Ema
+h4EmaBear = h4Close < h4Ema
+
+// H4 BOS/CHoCH 结构方向：在 H4 上下文里维护摆动高低点 + 结构偏向状态
+h4StructureBias(swingLen) =>
+    var float lastSwingHigh = na
+    var float lastSwingLow  = na
+    var int   bias = 0
+    ph = ta.pivothigh(high, swingLen, swingLen)
+    pl = ta.pivotlow(low, swingLen, swingLen)
+    if not na(ph)
+        lastSwingHigh := ph
+    if not na(pl)
+        lastSwingLow := pl
+    if not na(lastSwingHigh) and close > lastSwingHigh
+        bias := 1
+    if not na(lastSwingLow) and close < lastSwingLow
+        bias := -1
+    bias
+
+h4Bias = request.security(syminfo.tickerid, "240", h4StructureBias(h4SwingLookback), lookahead=barmerge.lookahead_off)
+h4BosBull = h4Bias == 1
+h4BosBear = h4Bias == -1
+
+// 方向组合：EMA 或 BOS/CHoCH 任一支持即可（OR）
+allowedLong  = h4EmaBull or h4BosBull
+allowedShort = h4EmaBear or h4BosBear
+
+// ============================================================
+// Task 3: M30 回调前置区域（价格回到 EMA20 附近才进入评分区）
+// ============================================================
+
+pullbackTol = pullbackAtrMult * atrVal
+inLongPullbackZone  = bullStack and math.abs(close - emaFast) <= pullbackTol
+inShortPullbackZone = bearStack and math.abs(close - emaFast) <= pullbackTol
+
+// ============================================================
+// Task 4: ICT 因子① 流动性扫荡评分（0-100）
+// ============================================================
+
+sweepLookback  = input.int(10, "扫荡摆动点回看根数", group="ICT")
+sweepScoreMult = input.float(200.0, "扫荡评分系数", group="ICT")
+
+sweepSwingHigh = ta.pivothigh(high, sweepLookback, sweepLookback)
+sweepSwingLow  = ta.pivotlow(low, sweepLookback, sweepLookback)
+
+var float lastSwingHighPx = na
+var float lastSwingLowPx  = na
+if not na(sweepSwingHigh)
+    lastSwingHighPx := sweepSwingHigh
+if not na(sweepSwingLow)
+    lastSwingLowPx := sweepSwingLow
+
+// 触发：影线刺穿摆动点，但收盘收回点内侧
+bullSweep = not na(lastSwingLowPx) and low < lastSwingLowPx and close > lastSwingLowPx
+bearSweep = not na(lastSwingHighPx) and high > lastSwingHighPx and close < lastSwingHighPx
+
+bullSweepDepth = bullSweep ? (lastSwingLowPx - low) : 0.0
+bearSweepDepth = bearSweep ? (high - lastSwingHighPx) : 0.0
+
+bullSweepScore = bullSweep ? math.min(100.0, (bullSweepDepth / atrVal) * sweepScoreMult) : 0.0
+bearSweepScore = bearSweep ? math.min(100.0, (bearSweepDepth / atrVal) * sweepScoreMult) : 0.0
+
+// ============================================================
+// Task 5: ICT 因子② 订单块回踩评分（0-100，只跟踪最近一个有效OB）
+// ============================================================
+
+obLookback        = input.int(20, "OB回看窗口(预留)", group="ICT")
+obImpulseAtrMult  = input.float(2.0, "OB冲量阈值 (x ATR)", group="ICT")
+obImpulseScoreDiv = input.float(25.0, "OB评分系数", group="ICT")
+obDecayBars       = input.int(5, "OB衰减步长(根)", group="ICT")
+obDecayPct        = input.float(10.0, "OB每步衰减%", group="ICT")
+obMaxAgeBars      = input.int(50, "OB最大有效期(根)", group="ICT")
+
+var float bullObHigh     = na
+var float bullObLow      = na
+var int   bullObBar      = na
+var float bullObImpulse  = na
+
+var float bearObHigh     = na
+var float bearObLow      = na
+var int   bearObBar      = na
+var float bearObImpulse  = na
+
+impulseThreshold = obImpulseAtrMult * atrVal
+barMove = close - close[1]
+
+// 强势上冲：标记冲量前最后一根反向(阴)K线为多头订单块
+if barMove >= impulseThreshold and close[1] < open[1]
+    bullObHigh    := high[1]
+    bullObLow     := low[1]
+    bullObBar     := bar_index[1]
+    bullObImpulse := barMove
+
+// 强势下冲：标记冲量前最后一根反向(阳)K线为空头订单块
+if -barMove >= impulseThreshold and close[1] > open[1]
+    bearObHigh    := high[1]
+    bearObLow     := low[1]
+    bearObBar     := bar_index[1]
+    bearObImpulse := -barMove
+
+bullObAge = na(bullObBar) ? na : bar_index - bullObBar
+bearObAge = na(bearObBar) ? na : bar_index - bearObBar
+
+bullObValid = not na(bullObBar) and bullObAge <= obMaxAgeBars
+bearObValid = not na(bearObBar) and bearObAge <= obMaxAgeBars
+
+bullObTap = bullObValid and low <= bullObHigh and high >= bullObLow
+bearObTap = bearObValid and high >= bearObLow and low <= bearObHigh
+
+bullObDecaySteps = bullObValid ? math.floor(bullObAge / obDecayBars) : 0.0
+bearObDecaySteps = bearObValid ? math.floor(bearObAge / obDecayBars) : 0.0
+
+bullObBaseScore = bullObValid ? math.min(100.0, (bullObImpulse / atrVal) * obImpulseScoreDiv) : 0.0
+bearObBaseScore = bearObValid ? math.min(100.0, (bearObImpulse / atrVal) * obImpulseScoreDiv) : 0.0
+
+bullObDecayFactor = math.max(0.0, 1.0 - (bullObDecaySteps * obDecayPct / 100.0))
+bearObDecayFactor = math.max(0.0, 1.0 - (bearObDecaySteps * obDecayPct / 100.0))
+
+bullObScore = bullObTap ? bullObBaseScore * bullObDecayFactor : 0.0
+bearObScore = bearObTap ? bearObBaseScore * bearObDecayFactor : 0.0
+
+// ============================================================
+// Task 6: ICT 因子③ 公允价值缺口(FVG)回补评分（0-100，只跟踪最近一个未回补缺口）
+// ============================================================
+
+fvgScoreMult = input.float(150.0, "FVG评分系数", group="ICT")
+
+var float bullFvgTop    = na
+var float bullFvgBottom = na
+var bool  bullFvgFilled = true
+
+var float bearFvgTop    = na
+var float bearFvgBottom = na
+var bool  bearFvgFilled = true
+
+// 看涨缺口：K1(2根前).high < K3(当前).low
+newBullGapTop    = low
+newBullGapBottom = high[2]
+if newBullGapTop > newBullGapBottom
+    bullFvgTop    := newBullGapTop
+    bullFvgBottom := newBullGapBottom
+    bullFvgFilled := false
+
+// 看跌缺口：K1(2根前).low > K3(当前).high
+newBearGapBottom = high
+newBearGapTop    = low[2]
+if newBearGapBottom < newBearGapTop
+    bearFvgTop    := newBearGapTop
+    bearFvgBottom := newBearGapBottom
+    bearFvgFilled := false
+
+// 价格完全穿越缺口视为已回补，停止评分
+if not bullFvgFilled and not na(bullFvgBottom) and low <= bullFvgBottom
+    bullFvgFilled := true
+if not bearFvgFilled and not na(bearFvgTop) and high >= bearFvgTop
+    bearFvgFilled := true
+
+bullFvgTouch = not bullFvgFilled and not na(bullFvgTop) and low <= bullFvgTop and low >= bullFvgBottom
+bearFvgTouch = not bearFvgFilled and not na(bearFvgBottom) and high >= bearFvgBottom and high <= bearFvgTop
+
+bullFvgSize = na(bullFvgTop) ? 0.0 : (bullFvgTop - bullFvgBottom)
+bearFvgSize = na(bearFvgTop) ? 0.0 : (bearFvgTop - bearFvgBottom)
+
+bullFvgScore = bullFvgTouch ? math.min(100.0, (bullFvgSize / atrVal) * fvgScoreMult) : 0.0
+bearFvgScore = bearFvgTouch ? math.min(100.0, (bearFvgSize / atrVal) * fvgScoreMult) : 0.0
+
+// ============================================================
+// Task 7: 日内熔断风控
+// ============================================================
+
+dailyLossPct    = input.float(3.0, "单日最大亏损% (熔断)", group="Risk Guard")
+maxConsecLosses = input.int(3, "单日最大连续亏损笔数 (熔断)", group="Risk Guard")
+
+var float dayStartEquity  = na
+var int   consecLosses    = 0
+var int   lastClosedCount = 0
+
+isNewTradingDay = dayofmonth != dayofmonth[1] or month != month[1] or year != year[1]
+if isNewTradingDay or na(dayStartEquity)
+    dayStartEquity := strategy.equity
+    consecLosses := 0
+
+if strategy.closedtrades > lastClosedCount
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    consecLosses := lastTradeProfit < 0 ? consecLosses + 1 : 0
+    lastClosedCount := strategy.closedtrades
+
+dailyLossHit  = (strategy.equity - dayStartEquity) <= -(dayStartEquity * dailyLossPct / 100.0)
+consecLossHit = consecLosses >= maxConsecLosses
+circuitBreakerActive = dailyLossHit or consecLossHit
+
+// ============================================================
+// Task 8: 入场判定(三因子评分) + 下单 + 止盈止损 + 仓位管理
+// ============================================================
+
+singleThreshold = input.float(80.0, "单因子直接入场阈值", group="Entry")
+comboThreshold  = input.float(120.0, "共振(求和)入场阈值", group="Entry")
+
+longMaxScore = math.max(bullSweepScore, math.max(bullObScore, bullFvgScore))
+longSumScore = bullSweepScore + bullObScore + bullFvgScore
+shortMaxScore = math.max(bearSweepScore, math.max(bearObScore, bearFvgScore))
+shortSumScore = bearSweepScore + bearObScore + bearFvgScore
+
+longSignal  = allowedLong  and inLongPullbackZone  and (longMaxScore >= singleThreshold or longSumScore >= comboThreshold)
+shortSignal = allowedShort and inShortPullbackZone and (shortMaxScore >= singleThreshold or shortSumScore >= comboThreshold)
+
+// ATR 止盈止损
+slDistanceLong  = slAtrMult * atrVal
+slDistanceShort = slAtrMult * atrVal
+tpDistanceLong  = tpAtrMult * atrVal
+tpDistanceShort = tpAtrMult * atrVal
+
+// 按权益风险% 反推手数
+riskAmount = strategy.equity * (riskPct / 100.0)
+qtyLong  = slDistanceLong  > 0 ? riskAmount / slDistanceLong  : 0.0
+qtyShort = slDistanceShort > 0 ? riskAmount / slDistanceShort : 0.0
+
+// 下单：同一时间只持一笔仓位；反向信号触发时 strategy.entry 默认先平仓再反手
+if longSignal and not circuitBreakerActive and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty=qtyLong)
+    strategy.exit("Long Exit", from_entry="Long", stop=close - slDistanceLong, limit=close + tpDistanceLong)
+
+if shortSignal and not circuitBreakerActive and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=qtyShort)
+    strategy.exit("Short Exit", from_entry="Short", stop=close + slDistanceShort, limit=close - tpDistanceShort)
+
+// ============================================================
+// Task 9: 图表可视化
+// ============================================================
+
+// H4 方向背景色
+bgcolor(allowedLong and not allowedShort ? color.new(color.green, 90) : allowedShort and not allowedLong ? color.new(color.red, 90) : na, title="H4 Direction")
+
+// 熔断状态背景色
+bgcolor(circuitBreakerActive ? color.new(color.gray, 60) : na, title="Circuit Breaker")
+
+// 入场箭头
+plotshape(longSignal, title="Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortSignal, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// 触发因子标签
+longTriggerLabel = bullSweepScore >= singleThreshold ? "扫荡" : bullObScore >= singleThreshold ? "订单块" : bullFvgScore >= singleThreshold ? "FVG" : longSumScore >= comboThreshold ? "共振" : ""
+shortTriggerLabel = bearSweepScore >= singleThreshold ? "扫荡" : bearObScore >= singleThreshold ? "订单块" : bearFvgScore >= singleThreshold ? "FVG" : shortSumScore >= comboThreshold ? "共振" : ""
+
+if longSignal
+    label.new(bar_index, low - atrVal, longTriggerLabel, style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+if shortSignal
+    label.new(bar_index, high + atrVal, shortTriggerLabel, style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+// 三因子实时评分调试面板
+var table debugTable = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    table.cell(debugTable, 0, 0, "因子", text_color=color.white)
+    table.cell(debugTable, 1, 0, "多/空评分", text_color=color.white)
+    table.cell(debugTable, 0, 1, "扫荡", text_color=color.white)
+    table.cell(debugTable, 1, 1, str.tostring(bullSweepScore, "#.#") + " / " + str.tostring(bearSweepScore, "#.#"), text_color=color.yellow)
+    table.cell(debugTable, 0, 2, "订单块", text_color=color.white)
+    table.cell(debugTable, 1, 2, str.tostring(bullObScore, "#.#") + " / " + str.tostring(bearObScore, "#.#"), text_color=color.yellow)
+    table.cell(debugTable, 0, 3, "FVG", text_color=color.white)
+    table.cell(debugTable, 1, 3, str.tostring(bullFvgScore, "#.#") + " / " + str.tostring(bearFvgScore, "#.#"), text_color=color.yellow)
