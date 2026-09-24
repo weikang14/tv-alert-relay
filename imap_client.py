@@ -18,7 +18,7 @@ class ImapClient:
         self._conn = None
 
     def __enter__(self) -> "ImapClient":
-        self._conn = imaplib.IMAP4_SSL(self._host)
+        self._conn = imaplib.IMAP4_SSL(self._host, timeout=30)
         self._conn.login(self._user, self._password)
         self._conn.select("INBOX")
         return self
@@ -33,7 +33,7 @@ class ImapClient:
             return []
         results = []
         for uid in data[0].split():
-            typ, msg_data = self._conn.uid("fetch", uid, "(RFC822)")
+            typ, msg_data = self._conn.uid("fetch", uid, "(BODY.PEEK[])")
             if typ == "OK" and msg_data and msg_data[0]:
                 results.append(FetchedEmail(uid=uid, raw=msg_data[0][1]))
         return results

@@ -48,12 +48,13 @@ async def lifespan(app: FastAPI):
     conn.close()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def check_auth(credentials: HTTPBasicCredentials = Depends(security), cfg: Config = Depends(get_config)) -> None:
-    ok_user = secrets.compare_digest(credentials.username, cfg.web_user)
-    ok_pass = secrets.compare_digest(credentials.password, cfg.web_password)
+    # bytes, not str: compare_digest raises TypeError on non-ASCII str
+    ok_user = secrets.compare_digest(credentials.username.encode(), cfg.web_user.encode())
+    ok_pass = secrets.compare_digest(credentials.password.encode(), cfg.web_password.encode())
     if not (ok_user and ok_pass):
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
 
@@ -85,7 +86,8 @@ def dashboard(
 @app.get("/healthz")
 def healthz(request: Request, cfg: Config = Depends(get_config), conn=Depends(get_db)):
     if cfg.healthz_shared_secret:
-        if request.headers.get("X-Healthz-Secret") != cfg.healthz_shared_secret:
+        header = request.headers.get("X-Healthz-Secret")
+        if header is None or not secrets.compare_digest(header.encode(), cfg.healthz_shared_secret.encode()):
             raise HTTPException(status_code=403, detail="Forbidden")
     status = db_module.get_status(conn)
     healthy = compute_health(
@@ -101,5 +103,7 @@ def healthz(request: Request, cfg: Config = Depends(get_config), conn=Depends(ge
 
 
 if __name__ == "__main__":
+    import logging
     import uvicorn
+    logging.basicConfig(level=logging.INFO)
     uvicorn.run(app, host="127.0.0.1", port=8788)

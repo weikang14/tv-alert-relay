@@ -31,6 +31,14 @@ def test_dashboard_requires_auth():
     assert resp.status_code == 401
 
 
+def test_dashboard_rejects_wrong_password():
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    client = TestClient(app)
+    resp = client.get("/", auth=("admin", "wrong"))
+    assert resp.status_code == 401
+
+
 def test_dashboard_ok_with_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
     app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")

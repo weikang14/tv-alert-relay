@@ -30,8 +30,10 @@ def load_config() -> Config:
         tg_chat_id=required("TG_CHAT_ID"),
         web_user=required("WEB_USER"),
         web_password=required("WEB_PASSWORD"),
-        db_path=os.environ.get("DB_PATH", "tvalert.db"),
-        tv_sender=os.environ.get("TV_SENDER", "noreply@tradingview.com"),
-        poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "300")),
-        healthz_shared_secret=os.environ.get("HEALTHZ_SHARED_SECRET", ""),
+        # `or`, not a .get() default: a set-but-empty var must fall back too
+        # (empty TV_SENDER would make the IMAP FROM search match every sender).
+        db_path=os.environ.get("DB_PATH") or "tvalert.db",
+        tv_sender=os.environ.get("TV_SENDER") or "noreply@tradingview.com",
+        poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS") or "300"),
+        healthz_shared_secret=os.environ.get("HEALTHZ_SHARED_SECRET") or "",
     )

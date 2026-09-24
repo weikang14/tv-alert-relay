@@ -1,7 +1,11 @@
+import logging
+
 from imap_client import ImapClient
 from mail import parse_alert_email
 from telegram import send_telegram_message
 import db
+
+log = logging.getLogger(__name__)
 
 
 def poll_once(
@@ -26,6 +30,8 @@ def poll_once(
                     client.mark_seen(item.uid)
                 else:
                     all_ok = False
+        log.info("poll ok, %d emails", len(emails))
         db.record_poll(conn, success=all_ok)
     except Exception:
+        log.exception("poll failed")
         db.record_poll(conn, success=False)

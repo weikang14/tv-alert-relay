@@ -11,4 +11,5 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> tuple[bool
         r.raise_for_status()
         return True, None
     except requests.RequestException as e:
-        return False, str(e)
+        # HTTPError text includes the request URL, which embeds the token.
+        return False, str(e).replace(bot_token, "<token>")

@@ -51,4 +51,13 @@ Telegram 里找 `@BotFather` → `/newbot` 建一个新 bot(跟 goldbot 用的�
 
 ## 8. 心跳监控(GitHub Actions)
 
-见仓库 `.github/workflows/heartbeat.yml` 和其配套的仓库 Secrets 设置说明。
+工作流见仓库 `.github/workflows/heartbeat.yml`(每 30 分钟探测一次 `/healthz`)。
+需要配两个仓库 Secret:
+
+GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret:
+- `TVALERT_HEALTHZ_URL` = `https://tvalert.<你的前缀>.duckdns.org/healthz`
+- `TVALERT_HEALTHZ_SECRET` = `.env` 里配的 `HEALTHZ_SHARED_SECRET`(留空则这个 secret 也留空)
+
+注意:工作流一推到默认分支就会开始按计划运行;在上面两个 Secret 配好之前,它每
+30 分钟都会失败一次(GitHub 默认会给你发工作流失败邮件)。所以推送后尽快配好
+Secret,否则会先收到几封无意义的失败邮件。

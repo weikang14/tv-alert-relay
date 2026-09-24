@@ -21,18 +21,29 @@ class FakeImapClient:
         self.marked_seen.append(uid)
 
 
+def install_fake_imap(monkeypatch, emails):
+    """Patch poller's ImapClient; returns the list the created fake gets appended to."""
+    created = []
+
+    def factory(host, user, pw):
+        client = FakeImapClient(host, user, pw, emails)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(poller_module, "ImapClient", factory)
+    return created
+
+
 def test_poll_once_sends_and_records_success(monkeypatch):
     conn = db_module.connect(":memory:")
     fake_email = FetchedEmail(uid=b"1", raw=b"raw")
-    monkeypatch.setattr(
-        poller_module, "ImapClient",
-        lambda host, user, pw: FakeImapClient(host, user, pw, [fake_email]),
-    )
+    created = install_fake_imap(monkeypatch, [fake_email])
     monkeypatch.setattr(poller_module, "parse_alert_email", lambda raw: ("Subject A", "Body A"))
     monkeypatch.setattr(poller_module, "send_telegram_message", lambda token, chat, text: (True, None))
 
     poller_module.poll_once(conn, "imap.gmail.com", "u", "p", "noreply@tradingview.com", "tok", "chat")
 
+    assert created[0].marked_seen == [b"1"]
     alerts = db_module.recent_alerts(conn)
     assert len(alerts) == 1
     assert alerts[0]["subject"] == "Subject A"
@@ -45,15 +56,13 @@ def test_poll_once_sends_and_records_success(monkeypatch):
 def test_poll_once_records_failure_when_send_fails(monkeypatch):
     conn = db_module.connect(":memory:")
     fake_email = FetchedEmail(uid=b"1", raw=b"raw")
-    monkeypatch.setattr(
-        poller_module, "ImapClient",
-        lambda host, user, pw: FakeImapClient(host, user, pw, [fake_email]),
-    )
+    created = install_fake_imap(monkeypatch, [fake_email])
     monkeypatch.setattr(poller_module, "parse_alert_email", lambda raw: ("Subject A", "Body A"))
     monkeypatch.setattr(poller_module, "send_telegram_message", lambda token, chat, text: (False, "boom"))
 
     poller_module.poll_once(conn, "imap.gmail.com", "u", "p", "noreply@tradingview.com", "tok", "chat")
 
+    assert created[0].marked_seen == []  # left unread so the next poll retries it
     alerts = db_module.recent_alerts(conn)
     assert alerts[0]["sent_ok"] == 0
     assert alerts[0]["error"] == "boom"
