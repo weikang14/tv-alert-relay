@@ -120,3 +120,40 @@ def test_poll_returns_500_when_unhealthy_after_failures(monkeypatch):
     client = TestClient(app)
     resp = client.post("/poll", auth=("admin", "secret"))
     assert resp.status_code == 500
+
+
+def test_export_requires_auth():
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    client = TestClient(app)
+    resp = client.get("/export")
+    assert resp.status_code == 401
+
+
+def test_export_returns_empty_list_when_no_alerts():
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    client = TestClient(app)
+    resp = client.get("/export", auth=("admin", "secret"))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["alerts"] == []
+    assert "exported_at" in data
+
+
+def test_export_returns_all_alerts_as_json():
+    conn = db_module.connect(":memory:")
+    db_module.insert_alert(conn, "Subj1", "Body1", True, None)
+    db_module.insert_alert(conn, "Subj2", "Body2", False, "boom")
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: conn
+    client = TestClient(app)
+    resp = client.get("/export", auth=("admin", "secret"))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["alerts"]) == 2
+    subjects = {a["subject"] for a in data["alerts"]}
+    assert subjects == {"Subj1", "Subj2"}
+    errored = [a for a in data["alerts"] if a["subject"] == "Subj2"][0]
+    assert errored["sent_ok"] == 0
+    assert errored["error"] == "boom"

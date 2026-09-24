@@ -125,6 +125,15 @@ def trigger_poll(
     return JSONResponse(body, status_code=200 if healthy else 500)
 
 
+@app.get("/export")
+def export_alerts(conn=Depends(get_db), _auth: None = Depends(check_auth)):
+    rows = db_module.recent_alerts(conn, limit=100000)
+    return JSONResponse({
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "alerts": [dict(row) for row in rows],
+    })
+
+
 if __name__ == "__main__":
     import logging
     import uvicorn
