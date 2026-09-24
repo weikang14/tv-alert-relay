@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS status (
 
 
 def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    # ponytail: FastAPI runs sync route handlers in worker threads, so the
+    # single long-lived connection is used across threads; SQLite's C library
+    # is thread-safe (serialized) by default, only Python's own same-thread
+    # guard needs disabling here.
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO status (id, consecutive_errors) VALUES (1, 0)")
