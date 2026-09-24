@@ -102,6 +102,29 @@ def healthz(request: Request, cfg: Config = Depends(get_config), conn=Depends(ge
     return JSONResponse(body, status_code=200 if healthy else 500)
 
 
+@app.post("/poll")
+def trigger_poll(
+    cfg: Config = Depends(get_config),
+    conn=Depends(get_db),
+    _auth: None = Depends(check_auth),
+):
+    poll_once(
+        conn, GMAIL_IMAP_HOST, cfg.gmail_user, cfg.gmail_app_password,
+        cfg.tv_sender, cfg.tg_bot_token, cfg.tg_chat_id,
+    )
+    status = db_module.get_status(conn)
+    healthy = compute_health(
+        _parse_dt(status["last_poll_at"]), status["consecutive_errors"],
+        datetime.now(timezone.utc), cfg.poll_interval_seconds,
+    )
+    body = {
+        "healthy": healthy,
+        "last_poll_at": status["last_poll_at"],
+        "consecutive_errors": status["consecutive_errors"],
+    }
+    return JSONResponse(body, status_code=200 if healthy else 500)
+
+
 if __name__ == "__main__":
     import logging
     import uvicorn
