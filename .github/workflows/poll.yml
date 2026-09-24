@@ -1,0 +1,16 @@
+name: poll
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  trigger-poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: trigger poll
+        run: |
+          curl --fail --max-time 60 -X POST \
+            -u "${{ secrets.TVALERT_WEB_USER }}:${{ secrets.TVALERT_WEB_PASSWORD }}" \
+            "${{ secrets.TVALERT_APP_URL }}/poll"
