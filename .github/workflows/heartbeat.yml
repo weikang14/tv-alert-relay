@@ -1,0 +1,16 @@
+name: heartbeat
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check-healthz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: curl healthz
+        run: |
+          curl --fail --max-time 10 \
+            -H "X-Healthz-Secret: ${{ secrets.TVALERT_HEALTHZ_SECRET }}" \
+            "${{ secrets.TVALERT_HEALTHZ_URL }}"
