@@ -136,6 +136,8 @@ def export_alerts(conn=Depends(get_db), _auth: None = Depends(check_auth)):
 
 if __name__ == "__main__":
     import logging
+    import os
     import uvicorn
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(app, host="127.0.0.1", port=8788)
+    port = int(os.environ.get("PORT", "8788"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
