@@ -1,0 +1,16 @@
+[Unit]
+Description=TradingView alert relay to Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tvalert
+WorkingDirectory=/opt/tvalert/src/tv-alert-relay
+ExecStart=/opt/tvalert/venv/bin/python /opt/tvalert/src/tv-alert-relay/main.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/tvalert/.env
+
+[Install]
+WantedBy=multi-user.target
