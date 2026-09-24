@@ -1,63 +1,57 @@
-# tv-alert-relay 部署(复用现有 Oracle Cloud VM)
+# tv-alert-relay 部署(Render)
 
-前提:goldbot 已经在同一台 VM 上跑着,VM、Caddy、DuckDNS 账号都已就绪。这里
-只加第二个独立服务,不改动 goldbot 任何东西(不同用户、不同目录、不同端口、
-不同数据库)。
+Oracle Cloud VM 版本的部署步骤挪到了 `docs/DEPLOY-ORACLE.md`(以后如果要重新
+搬回某台常驻服务器,可以照那份抄)。这一份是当前实际在用的 Render 部署方式。
 
-## 1. 建专属系统用户 + 目录
+## 1. Gmail 应用专用密码
 
-    sudo useradd -r -m -d /opt/tvalert tvalert
-    sudo -u tvalert git clone <repo> /opt/tvalert/src/tv-alert-relay
-    cd /opt/tvalert && sudo -u tvalert python3 -m venv venv
-    sudo -u tvalert venv/bin/pip install -r src/tv-alert-relay/requirements.txt
+Google 账号 → 安全性 → 两步验证(需先开启)→ 应用专用密码 → 生成一个,填进
+下一步 Render 的环境变量。
 
-## 2. Gmail 应用专用密码
+## 2. Telegram Bot
 
-Google 账号 → 安全性 → 两步验证(需先开启)→ 应用专用密码 → 生成一个,
-填进下一步的 `.env`。
+Telegram 里找 `@BotFather` → `/newbot` 建一个新 bot,拿到 token;给 bot 发条
+消息后访问 `https://api.telegram.org/bot<token>/getUpdates` 找 `chat_id`。
 
-## 3. Telegram Bot
+## 3. 部署到 Render
 
-Telegram 里找 `@BotFather` → `/newbot` 建一个新 bot(跟 goldbot 用的不是同
-一个,两边推送物理隔离),拿到 token;给 bot 发条消息后访问
-`https://api.telegram.org/bot<token>/getUpdates` 找 `chat_id`。
+1. 去 [render.com](https://render.com) 用 GitHub 账号登录(不需要绑卡)。
+2. New → Blueprint,选这个仓库,Render 会读到根目录的 `render.yaml` 自动建好
+   服务骨架。
+3. 部署过程中 Render 会提示你填标了 `sync: false` 的那几个环境变量:
+   `GMAIL_USER`、`GMAIL_APP_PASSWORD`、`TG_BOT_TOKEN`、`TG_CHAT_ID`、
+   `WEB_USER`、`WEB_PASSWORD`、`HEALTHZ_SHARED_SECRET`(留空即可,除非你想启
+   用 `/healthz` 的额外密钥校验)。
+4. 部署完成后,Render 会给一个形如 `https://tv-alert-relay-xxxx.onrender.com`
+   的域名——这就是后面 GitHub Secrets 里要填的 `TVALERT_APP_URL`。
 
-## 4. 配置
+## 4. TradingView 侧
 
-    sudo -u tvalert cp src/tv-alert-relay/.env.example /opt/tvalert/.env
-    # 编辑 /opt/tvalert/.env,填 Gmail/Telegram/网页账号密码等真实值
-    sudo -u tvalert chmod 600 /opt/tvalert/.env
+建警报时在 Notifications 里勾选 "Send Email",不用配置别的——这个服务会自动
+去 Gmail 里捞 TradingView 发来的邮件。
 
-## 5. 起服务
+## 5. GitHub Actions 配的 3 个仓库 Secrets
 
-    sudo cp src/tv-alert-relay/deploy/tvalert.service /etc/systemd/system/
-    sudo systemctl daemon-reload && sudo systemctl enable --now tvalert
-    journalctl -u tvalert -f   # 看到轮询日志正常 = 部署成功
+GitHub 仓库 → Settings → Secrets and variables → Actions → New repository
+secret,建 3 个,`poll.yml`(每 5 分钟触发一次轮询,兼报警)和 `backup.yml`
+(每周备份一次历史记录)两个工作流共用:
 
-## 6. 网站(看板)
+- `TVALERT_APP_URL` = 第 3 步 Render 给的域名(不带路径,比如
+  `https://tv-alert-relay-xxxx.onrender.com`)
+- `TVALERT_WEB_USER` = 跟 Render 环境变量里的 `WEB_USER` 填一样的值
+- `TVALERT_WEB_PASSWORD` = 跟 Render 环境变量里的 `WEB_PASSWORD` 填一样的值
 
-1. DuckDNS 建一个新子域(比如 `tvalert.<你的前缀>.duckdns.org`),指到同一
-   个 VPS 公网 IP(跟 goldbot 用同一个 IP 即可)。
-2. 把 `deploy/Caddyfile.snippet` 的内容加进 `/etc/caddy/Caddyfile`(goldbot
-   已有的那段保留不动,新增这一段)。
-3. `sudo systemctl reload caddy`,首次访问自动签 Let's Encrypt 证书。
-4. 浏览器访问 `https://tvalert.<你的前缀>.duckdns.org`,会弹 Basic Auth
-   登录框,填 `.env` 里的 `WEB_USER`/`WEB_PASSWORD`。
+注意:`poll.yml` 一推到默认分支就会开始按计划运行;在上面 3 个 Secret 配好
+之前,它每 5 分钟都会失败一次(GitHub 默认会给你发工作流失败邮件)。所以部署
+完 Render、拿到域名后尽快配好这 3 个 Secret。
 
-## 7. TradingView 侧
+## 6. 看板访问
 
-建警报时在 Notifications 里勾选 "Send Email",不用配置别的——这个服务会
-自动去 Gmail 里捞 TradingView 发来的邮件。
+浏览器直接访问 Render 给的域名(比如
+`https://tv-alert-relay-xxxx.onrender.com`),会弹 Basic Auth 登录框,填
+`WEB_USER`/`WEB_PASSWORD`。
 
-## 8. 心跳监控(GitHub Actions)
+## 7. 备份文件在哪
 
-工作流见仓库 `.github/workflows/heartbeat.yml`(每 30 分钟探测一次 `/healthz`)。
-需要配两个仓库 Secret:
-
-GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret:
-- `TVALERT_HEALTHZ_URL` = `https://tvalert.<你的前缀>.duckdns.org/healthz`
-- `TVALERT_HEALTHZ_SECRET` = `.env` 里配的 `HEALTHZ_SHARED_SECRET`(留空则这个 secret 也留空)
-
-注意:工作流一推到默认分支就会开始按计划运行;在上面两个 Secret 配好之前,它每
-30 分钟都会失败一次(GitHub 默认会给你发工作流失败邮件)。所以推送后尽快配好
-Secret,否则会先收到几封无意义的失败邮件。
+`backups/alerts.json`,每周日自动更新,提交历史本身就是各个时间点的快照,不需
+要额外去别处找。
