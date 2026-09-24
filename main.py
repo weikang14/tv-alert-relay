@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,12 +28,21 @@ def get_db():
     raise RuntimeError("get_db dependency not overridden")
 
 
-async def _poll_loop(cfg: Config, conn) -> None:
-    while True:
-        await asyncio.to_thread(
-            poll_once, conn, GMAIL_IMAP_HOST, cfg.gmail_user, cfg.gmail_app_password,
+_poll_lock = threading.Lock()
+
+
+def _poll(cfg: Config, conn) -> None:
+    # _poll_loop and /poll must not fetch the same UNSEEN mail concurrently
+    with _poll_lock:
+        poll_once(
+            conn, GMAIL_IMAP_HOST, cfg.gmail_user, cfg.gmail_app_password,
             cfg.tv_sender, cfg.tg_bot_token, cfg.tg_chat_id,
         )
+
+
+async def _poll_loop(cfg: Config, conn) -> None:
+    while True:
+        await asyncio.to_thread(_poll, cfg, conn)
         await asyncio.sleep(cfg.poll_interval_seconds)
 
 
@@ -108,10 +118,7 @@ def trigger_poll(
     conn=Depends(get_db),
     _auth: None = Depends(check_auth),
 ):
-    poll_once(
-        conn, GMAIL_IMAP_HOST, cfg.gmail_user, cfg.gmail_app_password,
-        cfg.tv_sender, cfg.tg_bot_token, cfg.tg_chat_id,
-    )
+    _poll(cfg, conn)
     status = db_module.get_status(conn)
     healthy = compute_health(
         _parse_dt(status["last_poll_at"]), status["consecutive_errors"],
@@ -140,4 +147,5 @@ if __name__ == "__main__":
     import uvicorn
     logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get("PORT", "8788"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
+    uvicorn.run(app, host=host, port=port)

@@ -14,11 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: fetch export
+        env:
+          TVALERT_WEB_USER: ${{ secrets.TVALERT_WEB_USER }}
+          TVALERT_WEB_PASSWORD: ${{ secrets.TVALERT_WEB_PASSWORD }}
+          TVALERT_APP_URL: ${{ secrets.TVALERT_APP_URL }}
         run: |
           mkdir -p backups
           curl --fail --max-time 60 \
-            -u "${{ secrets.TVALERT_WEB_USER }}:${{ secrets.TVALERT_WEB_PASSWORD }}" \
-            "${{ secrets.TVALERT_APP_URL }}/export" -o backups/alerts.json
+            -u "${TVALERT_WEB_USER}:${TVALERT_WEB_PASSWORD}" \
+            "${TVALERT_APP_URL%/}/export" -o backups/alerts.json
       - name: commit if changed
         run: |
           git config user.name "github-actions[bot]"

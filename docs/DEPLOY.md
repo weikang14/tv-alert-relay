@@ -55,3 +55,10 @@ secret,建 3 个,`poll.yml`(每 5 分钟触发一次轮询,兼报警)和 `backup
 
 `backups/alerts.json`,每周日自动更新,提交历史本身就是各个时间点的快照,不需
 要额外去别处找。
+
+Render 免费层没有持久盘,每次重新部署都会清空网页历史。`render.yaml` 里的
+`buildFilter.ignoredPaths: backups/**` 让只改动 `backups/` 的备份提交不触发
+自动重新部署。如果发现每周备份提交后网页历史被清空,说明 `render.yaml` 里的
+`buildFilter.ignoredPaths` 配置在当前 Render 版本上没生效,去 Render 控制台的
+Settings → Build & Deploy 里手动关闭这个服务的 'Auto-Deploy',改成只在你自己推
+代码改动时手动点 'Deploy latest commit'。

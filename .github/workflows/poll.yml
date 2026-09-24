@@ -10,7 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: trigger poll
+        env:
+          TVALERT_WEB_USER: ${{ secrets.TVALERT_WEB_USER }}
+          TVALERT_WEB_PASSWORD: ${{ secrets.TVALERT_WEB_PASSWORD }}
+          TVALERT_APP_URL: ${{ secrets.TVALERT_APP_URL }}
         run: |
           curl --fail --max-time 60 -X POST \
-            -u "${{ secrets.TVALERT_WEB_USER }}:${{ secrets.TVALERT_WEB_PASSWORD }}" \
-            "${{ secrets.TVALERT_APP_URL }}/poll"
+            -u "${TVALERT_WEB_USER}:${TVALERT_WEB_PASSWORD}" \
+            "${TVALERT_APP_URL%/}/poll"

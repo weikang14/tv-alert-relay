@@ -1,5 +1,7 @@
 # tv-alert-relay 部署(复用现有 Oracle Cloud VM)
 
+> 存档说明:本文档提到的 `heartbeat.yml` 已在后续提交里被 `poll.yml` 取代并删除,这里保留原文只作历史参考,不代表当前状态。
+
 前提:goldbot 已经在同一台 VM 上跑着,VM、Caddy、DuckDNS 账号都已就绪。这里
 只加第二个独立服务,不改动 goldbot 任何东西(不同用户、不同目录、不同端口、
 不同数据库)。

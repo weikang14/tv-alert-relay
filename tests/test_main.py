@@ -1,3 +1,7 @@
+import threading
+import time
+from datetime import datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -103,7 +107,7 @@ def test_poll_triggers_poll_once_and_returns_healthy(monkeypatch):
     resp = client.post("/poll", auth=("admin", "secret"))
     assert resp.status_code == 200
     assert len(calls) == 1
-    assert calls[0][1] == GMAIL_IMAP_HOST
+    assert calls[0] == (conn, GMAIL_IMAP_HOST, "u", "p", "noreply@tradingview.com", "t", "c")
 
 
 def test_poll_returns_500_when_unhealthy_after_failures(monkeypatch):
@@ -122,6 +126,33 @@ def test_poll_returns_500_when_unhealthy_after_failures(monkeypatch):
     assert resp.status_code == 500
 
 
+def test_poll_lock_prevents_concurrent_execution(monkeypatch):
+    conn = db_module.connect(":memory:")
+    concurrent = {"count": 0, "max": 0}
+    counter_lock = threading.Lock()
+
+    def fake_poll_once(conn_arg, *args):
+        with counter_lock:
+            concurrent["count"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["count"])
+        time.sleep(0.05)
+        with counter_lock:
+            concurrent["count"] -= 1
+        db_module.record_poll(conn_arg, success=True)
+
+    monkeypatch.setattr(main_module, "poll_once", fake_poll_once)
+    cfg = make_cfg()
+    threads = [
+        threading.Thread(target=main_module._poll, args=(cfg, conn))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert concurrent["max"] == 1
+
+
 def test_export_requires_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
     app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
@@ -138,7 +169,7 @@ def test_export_returns_empty_list_when_no_alerts():
     assert resp.status_code == 200
     data = resp.json()
     assert data["alerts"] == []
-    assert "exported_at" in data
+    datetime.fromisoformat(data["exported_at"])
 
 
 def test_export_returns_all_alerts_as_json():
@@ -151,6 +182,7 @@ def test_export_returns_all_alerts_as_json():
     resp = client.get("/export", auth=("admin", "secret"))
     assert resp.status_code == 200
     data = resp.json()
+    datetime.fromisoformat(data["exported_at"])
     assert len(data["alerts"]) == 2
     subjects = {a["subject"] for a in data["alerts"]}
     assert subjects == {"Subj1", "Subj2"}
