@@ -129,6 +129,7 @@ def detect_entries(samples: list) -> list[EntrySignal]:
 
 
 _STATUS_AFTER_SL = {0: "SL_ONLY", 1: "TP1_THEN_SL", 2: "TP2_THEN_SL"}
+_STATUS_AFTER_REVERSAL = {0: "REVERSED_ONLY", 1: "TP1_THEN_REVERSED", 2: "TP2_THEN_REVERSED"}
 
 
 def evaluate_signal(
@@ -158,14 +159,17 @@ def evaluate_signal(
             break
 
         tp_pct = TP_LEVELS_PCT[tier]
+        # Matches Pine's exact operation order (`_src + (_src * (pct/100))`),
+        # not the algebraically-equal `_src * (1 + pct/100)` — the two round
+        # to different floats, which can flip a comparison at a tick-exact price.
         if direction == "long":
-            tp_price = entry_price * (1 + tp_pct / 100)
-            sl_price = entry_price * (1 - SL_PCT / 100)
+            tp_price = entry_price + (entry_price * (tp_pct / 100))
+            sl_price = entry_price - (entry_price * (SL_PCT / 100))
             tp_hit = bar.high > tp_price and prev_high < tp_price
             sl_hit = bar.low < sl_price and prev_low > sl_price
         else:
-            tp_price = entry_price * (1 - tp_pct / 100)
-            sl_price = entry_price * (1 + SL_PCT / 100)
+            tp_price = entry_price - (entry_price * (tp_pct / 100))
+            sl_price = entry_price + (entry_price * (SL_PCT / 100))
             tp_hit = bar.low < tp_price and prev_low > tp_price
             sl_hit = bar.high > sl_price and prev_high < sl_price
 
@@ -196,7 +200,13 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
         else:
             last_bar_time = datetime.fromisoformat(last_bar_time_str)
             gap_minutes = int((now - last_bar_time).total_seconds() // 60)
-            outputsize = min(200, max(1, gap_minutes + 5))
+            # Margin must cover a full bucket, not just the poll gap: a small
+            # gap (frequent polling) can still land mid-bucket, and a fetch
+            # window that doesn't reach the bucket's true first bar corrupts
+            # its aggregated open. +2*BUCKET_MINUTES+1 was verified by
+            # simulation to eliminate missed/spurious signals across poll
+            # intervals from 37s to 450s.
+            outputsize = min(200, max(1, gap_minutes + 2 * BUCKET_MINUTES + 1))
 
         fetched = fetch_recent_bars(api_key, symbol, outputsize)
 
@@ -236,23 +246,10 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
             all_samples = [carried_sample] + new_samples
 
         entries = detect_entries(all_samples)
-        pushed = 0
-        for entry in entries:
-            signal_id = db.insert_signal(
-                conn, entry.direction, entry.entry_price, entry.entry_time.isoformat(),
-                entry.entry_high, entry.entry_low,
-            )
-            # Suppress the PUSH for a stale replay (cold start / long outage) —
-            # still recorded for win-rate history either way (I1).
-            if (now - entry.entry_time) > timedelta(minutes=2 * BUCKET_MINUTES):
-                log.info("signal poll: entry #%d is stale, recorded but not pushed", signal_id)
-                continue
-            pushed += 1
-            text = f"\U0001F4CA Signal Entry #{signal_id}\n{entry.direction.upper()} @ {entry.entry_price}\n{entry.entry_time.isoformat()}"
-            ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
-            if not ok:
-                log.error("signal entry telegram send failed: %s", error)
 
+        # TP/SL runs BEFORE reversal handling below: a signal that legitimately
+        # hits its own TP3/SL within this batch must close on those terms, not
+        # be pre-empted by a same-poll reversal using a stale tier.
         for sig in db.open_signals(conn):
             new_tier, closing_status, new_prev_high, new_prev_low, exit_bar_time = evaluate_signal(
                 sig["direction"], sig["entry_price"], datetime.fromisoformat(sig["entry_time"]),
@@ -267,6 +264,44 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
                     log.error("signal result telegram send failed: %s", error)
             elif new_tier != sig["highest_tier"] or new_prev_high != sig["last_bar_high"] or new_prev_low != sig["last_bar_low"]:
                 db.update_signal(conn, sig["id"], new_tier, "OPEN", None, new_prev_high, new_prev_low)
+
+        pushed = 0
+        for entry in entries:
+            is_stale = (now - entry.entry_time) > timedelta(minutes=2 * BUCKET_MINUTES)
+
+            # Pine's strategy.entry() (pyramiding=0) reverses the position on
+            # an opposite-direction trigger — close any signal still open in
+            # the opposite direction at this entry's bar, at whatever tier it
+            # had reached (a signal that already closed above via its own
+            # TP3/SL is no longer in open_signals and is left alone).
+            for sig in db.open_signals(conn):
+                if sig["direction"] == entry.direction:
+                    continue
+                rev_status = _STATUS_AFTER_REVERSAL[sig["highest_tier"]]
+                db.update_signal(
+                    conn, sig["id"], sig["highest_tier"], rev_status, entry.entry_time.isoformat(),
+                    sig["last_bar_high"], sig["last_bar_low"],
+                )
+                if not is_stale:
+                    text = f"\U0001F504 Signal #{sig['id']} closed: {rev_status}"
+                    ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
+                    if not ok:
+                        log.error("signal reversal telegram send failed: %s", error)
+
+            signal_id = db.insert_signal(
+                conn, entry.direction, entry.entry_price, entry.entry_time.isoformat(),
+                entry.entry_high, entry.entry_low,
+            )
+            # Suppress the PUSH for a stale replay (cold start / long outage) —
+            # still recorded for win-rate history either way (I1).
+            if is_stale:
+                log.info("signal poll: entry #%d is stale, recorded but not pushed", signal_id)
+                continue
+            pushed += 1
+            text = f"\U0001F4CA Signal Entry #{signal_id}\n{entry.direction.upper()} @ {entry.entry_price}\n{entry.entry_time.isoformat()}"
+            ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
+            if not ok:
+                log.error("signal entry telegram send failed: %s", error)
 
         if new_samples:
             last_sample = new_samples[-1]

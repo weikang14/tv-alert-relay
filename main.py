@@ -161,7 +161,9 @@ def export_signals(conn=Depends(get_db), _auth: None = Depends(check_auth)):
     rows = db_module.recent_signals(conn, limit=100000)
     signals = [dict(row) for row in rows]
     closed = [s for s in signals if s["status"] != "OPEN"]
-    wins = [s for s in closed if s["status"] in ("TP1_THEN_SL", "TP2_THEN_SL", "TP3_FULL")]
+    wins = [s for s in closed if s["status"] in (
+        "TP1_THEN_SL", "TP2_THEN_SL", "TP3_FULL", "TP1_THEN_REVERSED", "TP2_THEN_REVERSED",
+    )]
     distribution: dict[str, int] = {}
     for s in signals:
         distribution[s["status"]] = distribution.get(s["status"], 0) + 1

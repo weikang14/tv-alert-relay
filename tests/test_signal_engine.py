@@ -218,6 +218,20 @@ def test_evaluate_signal_ignores_bars_at_or_before_entry_time():
     assert prev_low == 100.0
 
 
+def test_evaluate_signal_blowing_through_two_tiers_in_one_bar_advances_only_one():
+    # Claim 3 (verified against real Pine `switch` semantics): even if a
+    # single bar's range technically clears TWO tiers' thresholds, Pine's
+    # switch only executes its first matching branch per bar — only tier 1
+    # advances; tier 2 needs its own fresh crossing on a LATER bar.
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [_bar(16, 100, 100.5, 100, 100.4)]  # high clears both TP1(100.2) and TP2(100.35)
+    tier, status, prev_high, prev_low, exit_time = evaluate_signal(
+        "long", 100.0, entry_time, 0, prev_high=100.0, prev_low=100.0, bars=bars,
+    )
+    assert tier == 1  # NOT 2
+    assert status is None
+
+
 def test_evaluate_signal_no_change_when_no_bars_qualify():
     entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
     bars = [_bar(16, 100, 100.05, 99.95, 100.0)]  # inside all thresholds
@@ -253,6 +267,17 @@ def test_poll_once_caps_outputsize_at_200_after_long_gap(monkeypatch):
     with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch:
         poll_once(conn, "key", "XAU/USD", "tok", "chat")
         assert fake_fetch.call_args.args[2] == 200
+
+
+def test_poll_once_outputsize_includes_full_bucket_margin():
+    # Regression: a small poll gap alone is not enough margin — a bucket
+    # that closed mid-gap still needs its true first bar in the fetch, which
+    # requires reaching back a full bucket width, not just the gap.
+    conn = db_module.connect(":memory:")
+    db_module.set_last_bar_time(conn, "2026-09-25T10:20:00+00:00")
+    with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 25, tzinfo=timezone.utc))
+    assert fake_fetch.call_args.args[2] == 5 + 2 * 8 + 1
 
 
 def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
@@ -393,6 +418,56 @@ def test_poll_once_advances_tier_without_closing_or_pushing():
     assert rows[0]["last_bar_high"] == 100.25  # persisted for the next poll's crossing check
     assert rows[0]["last_bar_low"] == 100.0
     assert not fake_send.called  # no push for a tier advance that doesn't close
+
+
+def test_poll_once_reverses_open_signal_on_opposite_entry():
+    # Pine's strategy.entry() (pyramiding=0) reverses the position when an
+    # opposite-direction trigger fires — the old signal must close (at
+    # whatever tier it had reached) exactly when the new one opens.
+    conn = db_module.connect(":memory:")
+    signal_id = db_module.insert_signal(conn, "long", 95.0, "2026-09-25T09:00:00+00:00", 95.1, 94.9)
+    # Already at TP1, and its remaining TP2 threshold (~95.33) was already
+    # cleared a while ago (last_bar_high/low near bucket_c's own range) —
+    # bucket_c's bars produce no FRESH crossing (no prev-side reversal), so
+    # the normal TP/SL pass correctly leaves it OPEN at tier 1 for the
+    # reversal handling below to act on.
+    db_module.update_signal(conn, signal_id, 1, "OPEN", None, 100.5, 100.4)
+    # Seed a bullish previous bucket so the new (bearish) bucket triggers SHORT.
+    db_module.set_last_bucket_carry(conn, "2026-09-25T10:08:00+00:00", 100.0, 101.0, 101.0, 100.0)
+    bucket_c = [_bar(m, 101, 101, 100, 100) for m in range(16, 24)]
+    frozen_now = datetime(2026, 9, 25, 10, 25, tzinfo=timezone.utc)
+    with patch("signal_engine.fetch_recent_bars", return_value=bucket_c), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    rows = db_module.recent_signals(conn)
+    assert len(rows) == 2
+    long_row = next(r for r in rows if r["direction"] == "long")
+    short_row = next(r for r in rows if r["direction"] == "short")
+    assert long_row["status"] == "TP1_THEN_REVERSED"
+    assert long_row["exited_at"] == short_row["entry_time"]
+    assert short_row["status"] == "OPEN"
+    texts = [c.args[2] for c in fake_send.call_args_list]
+    assert any("TP1_THEN_REVERSED" in t for t in texts)
+    assert any("Signal Entry" in t for t in texts)
+
+
+def test_poll_once_reversal_close_not_pushed_when_entry_is_stale():
+    conn = db_module.connect(":memory:")
+    signal_id = db_module.insert_signal(conn, "long", 95.0, "2026-09-24T09:00:00+00:00", 95.1, 94.9)
+    # Its TP1 threshold (~95.19) was already cleared a while ago (last_bar_
+    # high/low near bucket_c's own range), so bucket_c's bars produce no
+    # fresh crossing — stays OPEN at tier 0 for the reversal to act on.
+    db_module.update_signal(conn, signal_id, 0, "OPEN", None, 100.5, 100.4)
+    db_module.set_last_bucket_carry(conn, "2026-09-25T10:08:00+00:00", 100.0, 101.0, 101.0, 100.0)
+    bucket_c = [_bar(m, 101, 101, 100, 100) for m in range(16, 24)]
+    frozen_now = datetime(2026, 9, 26, 10, 25, tzinfo=timezone.utc)  # a full day later -> stale
+    with patch("signal_engine.fetch_recent_bars", return_value=bucket_c), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    rows = db_module.recent_signals(conn)
+    long_row = next(r for r in rows if r["direction"] == "long")
+    assert long_row["status"] == "REVERSED_ONLY"  # still recorded
+    assert not fake_send.called  # neither the reversal close nor the new entry was pushed
 
 
 def test_poll_once_suppresses_push_but_still_records_stale_entries_on_bootstrap():

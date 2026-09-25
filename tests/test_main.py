@@ -219,6 +219,22 @@ def test_signals_export_returns_summary_and_distribution():
     assert data["summary"]["distribution"]["SL_ONLY"] == 1
 
 
+def test_signals_export_counts_reversed_after_tp_as_a_win():
+    conn = db_module.connect(":memory:")
+    db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00", 100.1, 99.9)
+    db_module.update_signal(conn, 1, 1, "TP1_THEN_REVERSED", "2026-09-25T10:40:00+00:00", 100.5, 100.3)
+    db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00", 100.1, 99.9)
+    db_module.update_signal(conn, 2, 0, "REVERSED_ONLY", "2026-09-25T11:20:00+00:00", 100.2, 99.8)
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: conn
+    client = TestClient(app)
+    resp = client.get("/signals/export", auth=("admin", "secret"))
+    data = resp.json()
+    assert data["summary"]["total_closed"] == 2
+    assert data["summary"]["wins"] == 1  # TP1_THEN_REVERSED wins, REVERSED_ONLY doesn't
+    assert data["summary"]["win_rate"] == 0.5
+
+
 def test_poll_route_triggers_signal_engine_alongside_gmail_poll(monkeypatch):
     conn = db_module.connect(":memory:")
     calls = []
