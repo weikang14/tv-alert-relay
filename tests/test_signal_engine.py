@@ -154,15 +154,42 @@ def test_poll_once_caps_outputsize_at_200_after_long_gap(monkeypatch):
 
 def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
     conn = db_module.connect(":memory:")
-    bars = [_bar(m, 100 + 0.01 * m, 100 + 0.01 * m, 100 + 0.01 * m, 100 + 0.01 * m) for m in range(0, 8)]
-    bars.append(_bar(8, 100.5, 100.5, 100.5, 105.0))  # forces a crossover on the next bucket
+    bucket0 = [_bar(m, 101, 101, 101, 100) for m in range(0, 8)]
+    bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
+    bars = bucket0 + bucket1
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
         poll_once(conn, "key", "XAU/USD", "tok", "chat")
-    # Whether or not this exact synthetic series crosses is incidental to this
-    # test's real assertion: the poll must complete without raising and must
-    # advance last_bar_time to the newest bar it processed.
+    rows = db_module.recent_signals(conn)
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["entry_price"] == 101.0
+    assert fake_send.called
     assert db_module.get_last_bar_time(conn) == bars[-1].time.isoformat()
+
+
+def test_poll_once_detects_entry_using_carried_over_bucket_sample():
+    conn = db_module.connect(":memory:")
+    db_module.set_last_bar_time(conn, "2026-09-25T09:59:00+00:00")
+    db_module.set_last_bucket_sample(conn, "2026-09-25T10:00:00+00:00", 100.0, 101.0)
+    bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
+    with patch("signal_engine.fetch_recent_bars", return_value=bucket1), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+    rows = db_module.recent_signals(conn)
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "long"
+
+
+def test_poll_once_survives_telegram_failure_on_entry_push():
+    conn = db_module.connect(":memory:")
+    bucket0 = [_bar(m, 101, 101, 101, 100) for m in range(0, 8)]
+    bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
+    bars = bucket0 + bucket1
+    with patch("signal_engine.fetch_recent_bars", return_value=bars), \
+         patch("signal_engine.send_telegram_message", return_value=(False, "boom")):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
+    assert len(db_module.recent_signals(conn)) == 1  # still recorded despite push failure
 
 
 def test_poll_once_swallows_market_data_errors():
@@ -183,3 +210,29 @@ def test_poll_once_closes_open_signal_and_pushes_result():
     rows = db_module.recent_signals(conn)
     assert rows[0]["status"] == "SL_ONLY"
     assert fake_send.called
+
+
+def test_poll_once_survives_telegram_failure_on_close_push():
+    conn = db_module.connect(":memory:")
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat())
+    sl_bar = _bar(16, 100, 100, 99.85, 99.9)
+    with patch("signal_engine.fetch_recent_bars", return_value=[sl_bar]), \
+         patch("signal_engine.send_telegram_message", return_value=(False, "boom")):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "SL_ONLY"  # still updated despite push failure
+
+
+def test_poll_once_advances_tier_without_closing_or_pushing():
+    conn = db_module.connect(":memory:")
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat())
+    tp1_bar = _bar(16, 100, 100.25, 100, 100.2)  # hits TP1 only, not TP2/SL
+    with patch("signal_engine.fetch_recent_bars", return_value=[tp1_bar]), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "OPEN"
+    assert rows[0]["highest_tier"] == 1
+    assert not fake_send.called  # no push for a tier advance that doesn't close
