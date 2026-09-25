@@ -10,10 +10,15 @@ from telegram import send_telegram_message
 
 log = logging.getLogger(__name__)
 
-# Chart timeframe (1 minute) x Multiplier for Alternate Signals (8), per the
-# design spec section 1 — the script's own "TIMEFRAME" input is unused dead
-# code, so this is a fixed constant, not read from any input.
-BUCKET_MINUTES = 8
+# Chart timeframe (changed 2026-09-25: 1 -> 15 minutes, 1-minute was too
+# noisy) x Multiplier for Alternate Signals (8, the script's own input) —
+# per the design spec section 1, the script's own "TIMEFRAME" input is
+# unused dead code, so the real alternate-resolution driver is the chart's
+# own candle period, which must match this constant exactly.
+CHART_TIMEFRAME_MINUTES = 15
+INT_RES = 8
+BUCKET_MINUTES = CHART_TIMEFRAME_MINUTES * INT_RES
+TWELVE_DATA_INTERVAL = f"{CHART_TIMEFRAME_MINUTES}min"
 
 ALMA_LENGTH = 2
 ALMA_OFFSET = 0.85
@@ -52,13 +57,14 @@ def _bucket_start(dt: datetime) -> datetime:
 
 
 def _bucket_candles(bars: list[Bar]) -> list[tuple[datetime, float, float, datetime, float, float]]:
-    """Group 1-minute bars into complete 8-minute candles: (bucket_start,
-    open, close, bar_time, high, low). `open` is the bucket's FIRST bar's
-    open, `close`/`high`/`low` come from its LAST (closing) 1-minute bar —
-    that closing bar is Pine's "current bar" at the moment the cross fires,
-    so its own high/low (not the bucket's aggregate range) is what the
-    script's entry/TP/SL logic actually references. A bucket is only
-    included once its closing (8th) 1-minute bar is present in `bars`."""
+    """Group chart-timeframe bars into complete alternate-resolution candles:
+    (bucket_start, open, close, bar_time, high, low). `open` is the bucket's
+    FIRST bar's open, `close`/`high`/`low` come from its LAST (closing)
+    chart-timeframe bar — that closing bar is Pine's "current bar" at the
+    moment the cross fires, so its own high/low (not the bucket's aggregate
+    range) is what the script's entry/TP/SL logic actually references. A
+    bucket is only included once its closing (INT_RES-th) bar is present
+    in `bars`."""
     groups: dict[datetime, list[Bar]] = {}
     for bar in bars:
         groups.setdefault(_bucket_start(bar.time), []).append(bar)
@@ -66,8 +72,8 @@ def _bucket_candles(bars: list[Bar]) -> list[tuple[datetime, float, float, datet
     candles = []
     for bucket_start in sorted(groups):
         group = sorted(groups[bucket_start], key=lambda b: b.time)
-        bucket_last_minute = bucket_start + timedelta(minutes=BUCKET_MINUTES - 1)
-        if group[-1].time != bucket_last_minute:
+        bucket_last_bar_time = bucket_start + timedelta(minutes=BUCKET_MINUTES - CHART_TIMEFRAME_MINUTES)
+        if group[-1].time != bucket_last_bar_time:
             continue
         closing_bar = group[-1]
         candles.append((bucket_start, group[0].open, closing_bar.close, closing_bar.time, closing_bar.high, closing_bar.low))
@@ -80,9 +86,9 @@ def bucket_samples(bars: list[Bar], seed: tuple[float, float] | None = None) -> 
     -calculated expression (not a raw `close`/`open`) into `request.security`
     makes Pine RE-EXECUTE that expression's formula using the requested
     timeframe's OWN bars — it does not resample an already-computed series.
-    So ALMA(length=2, offset=0.85, sigma=5) must be computed on each 8-minute
-    bucket's own (open, close) — the first bar's open and the last bar's
-    close — not on the continuous 1-minute series.
+    So ALMA(length=2, offset=0.85, sigma=5) must be computed on each
+    BUCKET_MINUTES-wide bucket's own (open, close) — the first bar's open
+    and the last bar's close — not on the continuous chart-timeframe series.
 
     `seed`: (prev_bucket_open, prev_bucket_close) carried from the last
     bucket processed in an earlier poll, so ALMA(length=2) has a prior value
@@ -200,18 +206,23 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
         else:
             last_bar_time = datetime.fromisoformat(last_bar_time_str)
             gap_minutes = int((now - last_bar_time).total_seconds() // 60)
-            # Margin must cover a full bucket, not just the poll gap: a small
-            # gap (frequent polling) can still land mid-bucket, and a fetch
-            # window that doesn't reach the bucket's true first bar corrupts
-            # its aggregated open. +2*BUCKET_MINUTES+1 was verified by
-            # simulation to eliminate missed/spurious signals across poll
-            # intervals from 37s to 450s.
-            outputsize = min(200, max(1, gap_minutes + 2 * BUCKET_MINUTES + 1))
+            # `outputsize` is a BAR count (Twelve Data), not a minute count —
+            # gap_minutes must be converted via CHART_TIMEFRAME_MINUTES, not
+            # used directly (that only happened to work when the chart was
+            # 1 minute). Margin must cover a full bucket in BARS (INT_RES),
+            # not just the poll gap: a small gap (frequent polling) can still
+            # land mid-bucket, and a fetch window that doesn't reach the
+            # bucket's true first bar corrupts its aggregated open.
+            # 2*INT_RES+1 bars of margin was verified by simulation to
+            # eliminate missed/spurious signals across poll intervals from
+            # 37s to 450s (at the original 1-minute chart timeframe).
+            gap_bars = -(-gap_minutes // CHART_TIMEFRAME_MINUTES)  # ceil division
+            outputsize = min(200, max(1, gap_bars + 2 * INT_RES + 1))
 
-        fetched = fetch_recent_bars(api_key, symbol, outputsize)
+        fetched = fetch_recent_bars(api_key, symbol, outputsize, TWELVE_DATA_INTERVAL)
 
         # Ignore the still-forming latest bar — its OHLC isn't final yet (C2).
-        fetched = [b for b in fetched if b.time + timedelta(minutes=1) <= now]
+        fetched = [b for b in fetched if b.time + timedelta(minutes=CHART_TIMEFRAME_MINUTES) <= now]
 
         bars = [b for b in fetched if last_bar_time is None or b.time > last_bar_time]
 

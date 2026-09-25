@@ -27,7 +27,7 @@ def test_fetch_recent_bars_parses_and_sorts_ascending(monkeypatch):
         ],
     }
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
-    bars = fetch_recent_bars("key", "XAU/USD", 200)
+    bars = fetch_recent_bars("key", "XAU/USD", 200, "15min")
     assert len(bars) == 2
     assert bars[0].time < bars[1].time
     assert bars[0].close == 3650.5
@@ -43,7 +43,7 @@ def test_fetch_recent_bars_dedupes_repeated_timestamps(monkeypatch):
         ],
     }
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
-    bars = fetch_recent_bars("key", "XAU/USD", 200)
+    bars = fetch_recent_bars("key", "XAU/USD", 200, "15min")
     assert len(bars) == 1
 
 
@@ -51,13 +51,13 @@ def test_fetch_recent_bars_raises_on_api_error_status(monkeypatch):
     payload = {"status": "error", "message": "invalid api key"}
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
     with pytest.raises(MarketDataError, match="invalid api key"):
-        fetch_recent_bars("bad-key", "XAU/USD", 200)
+        fetch_recent_bars("bad-key", "XAU/USD", 200, "15min")
 
 
 def test_fetch_recent_bars_raises_on_http_error(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse({}, status_code=429))
     with pytest.raises(MarketDataError):
-        fetch_recent_bars("key", "XAU/USD", 200)
+        fetch_recent_bars("key", "XAU/USD", 200, "15min")
 
 
 def test_fetch_recent_bars_redacts_api_key_from_http_error(monkeypatch):
@@ -69,21 +69,21 @@ def test_fetch_recent_bars_redacts_api_key_from_http_error(monkeypatch):
         )
     monkeypatch.setattr(requests, "get", fake_get)
     with pytest.raises(MarketDataError) as exc_info:
-        fetch_recent_bars("secret-td-key", "XAU/USD", 200)
+        fetch_recent_bars("secret-td-key", "XAU/USD", 200, "15min")
     assert "secret-td-key" not in str(exc_info.value)
     assert "<apikey>" in str(exc_info.value)
 
 
 def test_fetch_recent_bars_returns_empty_list_when_no_values(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse({"status": "ok", "values": []}))
-    assert fetch_recent_bars("key", "XAU/USD", 200) == []
+    assert fetch_recent_bars("key", "XAU/USD", 200, "15min") == []
 
 
 def test_fetch_recent_bars_raises_on_malformed_row(monkeypatch):
     payload = {"status": "ok", "values": [{"datetime": "2026-09-25 10:01:00", "open": "1"}]}
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
     with pytest.raises(MarketDataError):
-        fetch_recent_bars("key", "XAU/USD", 200)
+        fetch_recent_bars("key", "XAU/USD", 200, "15min")
 
 
 def test_fetch_recent_bars_raises_on_null_field_in_row(monkeypatch):
@@ -96,7 +96,7 @@ def test_fetch_recent_bars_raises_on_null_field_in_row(monkeypatch):
     }
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
     with pytest.raises(MarketDataError):
-        fetch_recent_bars("key", "XAU/USD", 200)
+        fetch_recent_bars("key", "XAU/USD", 200, "15min")
 
 
 def test_fetch_recent_bars_raises_on_null_datetime(monkeypatch):
@@ -109,11 +109,11 @@ def test_fetch_recent_bars_raises_on_null_datetime(monkeypatch):
     }
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
     with pytest.raises(MarketDataError):
-        fetch_recent_bars("key", "XAU/USD", 200)
+        fetch_recent_bars("key", "XAU/USD", 200, "15min")
 
 
 def test_fetch_recent_bars_raises_on_null_response_body(monkeypatch):
     # Test that a null JSON response body is caught and raises MarketDataError
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(None))
     with pytest.raises(MarketDataError):
-        fetch_recent_bars("key", "XAU/USD", 200)
+        fetch_recent_bars("key", "XAU/USD", 200, "15min")

@@ -19,13 +19,13 @@ class Bar:
     close: float
 
 
-def fetch_recent_bars(api_key: str, symbol: str, outputsize: int) -> list[Bar]:
+def fetch_recent_bars(api_key: str, symbol: str, outputsize: int, interval: str) -> list[Bar]:
     try:
         r = requests.get(
             TWELVE_DATA_URL,
             params={
                 "symbol": symbol,
-                "interval": "1min",
+                "interval": interval,
                 "outputsize": outputsize,
                 "apikey": api_key,
                 "timezone": "UTC",
