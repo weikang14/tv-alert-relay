@@ -26,3 +26,22 @@ def test_load_config_raises_when_missing_required(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     with pytest.raises(RuntimeError):
         config_module.load_config()
+
+
+def test_load_config_defaults_signal_engine_vars_when_unset(monkeypatch):
+    for k, v in REQUIRED_VARS.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
+    monkeypatch.delenv("SIGNAL_SYMBOL", raising=False)
+    cfg = config_module.load_config()
+    assert cfg.twelve_data_api_key == ""
+    assert cfg.signal_symbol == "XAU/USD"
+
+
+def test_load_config_reads_signal_engine_vars_when_set(monkeypatch):
+    for k, v in REQUIRED_VARS.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "td-key-123")
+    monkeypatch.setenv("SIGNAL_SYMBOL", "XAU/USD")
+    cfg = config_module.load_config()
+    assert cfg.twelve_data_api_key == "td-key-123"

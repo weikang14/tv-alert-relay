@@ -14,6 +14,8 @@ class Config:
     tv_sender: str
     poll_interval_seconds: int
     healthz_shared_secret: str
+    twelve_data_api_key: str
+    signal_symbol: str
 
 
 def load_config() -> Config:
@@ -36,4 +38,6 @@ def load_config() -> Config:
         tv_sender=os.environ.get("TV_SENDER") or "noreply@tradingview.com",
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS") or "300"),
         healthz_shared_secret=os.environ.get("HEALTHZ_SHARED_SECRET") or "",
+        twelve_data_api_key=os.environ.get("TWELVE_DATA_API_KEY") or "",
+        signal_symbol=os.environ.get("SIGNAL_SYMBOL") or "XAU/USD",
     )
