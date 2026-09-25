@@ -68,6 +68,28 @@ def _three_bucket_bullish_cross() -> list[Bar]:
     return bucket_a + bucket_b + bucket_c
 
 
+# --- _bucket_start: session anchor, not UTC midnight ---
+# (confirmed against the live TradingView chart for OANDA:XAUUSD: its native
+# 120-minute/daily bars start at 21:00 UTC in EDT and 22:00 UTC in EST,
+# flipping exactly on the US DST transition dates — not at UTC midnight)
+
+def test_bucket_start_anchors_to_5pm_new_york_in_edt():
+    dt = datetime(2026, 7, 1, 22, 30, tzinfo=timezone.utc)  # 18:30 EDT
+    assert _bucket_start(dt) == datetime(2026, 7, 1, 21, 0, tzinfo=timezone.utc)
+
+
+def test_bucket_start_anchors_to_5pm_new_york_in_est():
+    dt = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)  # 18:30 EST
+    assert _bucket_start(dt) == datetime(2026, 1, 1, 22, 0, tzinfo=timezone.utc)
+
+
+def test_bucket_start_session_boundary_flips_exactly_at_5pm_new_york():
+    before = datetime(2026, 7, 1, 20, 59, tzinfo=timezone.utc)  # 16:59 EDT: previous session
+    assert _bucket_start(before) == datetime(2026, 7, 1, 19, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 7, 1, 21, 1, tzinfo=timezone.utc)  # 17:01 EDT: new session's first bucket
+    assert _bucket_start(after) == datetime(2026, 7, 1, 21, 0, tzinfo=timezone.utc)
+
+
 # --- _bucket_candles / bucket_samples: aggregation on native bucket OHLC ---
 # (the C1 fix: ALMA must run on each bucket's own (first-bar-open,
 # last-bar-close), not on a continuous chart-timeframe series sampled at the

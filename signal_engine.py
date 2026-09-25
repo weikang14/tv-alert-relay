@@ -2,6 +2,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import db
 from alma import alma
@@ -28,6 +29,17 @@ ALMA_SIGMA = 5
 TP_LEVELS_PCT = [0.2, 0.35, 0.45]
 SL_PCT = 0.1
 
+# The exchange's trading "day" (and therefore every higher-timeframe bar,
+# including the intRes bucket the real script reads via request.security)
+# starts at 17:00 America/New_York, not UTC midnight — confirmed against the
+# live TradingView chart for OANDA:XAUUSD: its native 120-minute and daily
+# bars start at 21:00 UTC during EDT and 22:00 UTC during EST, flipping
+# exactly on the US DST transition dates. Anchoring buckets to a fixed UTC
+# offset (or to the Unix epoch, as this used to do) is wrong for roughly
+# half the year.
+_SESSION_TZ = ZoneInfo("America/New_York")
+_SESSION_START_HOUR = 17
+
 
 @dataclass
 class BucketSample:
@@ -51,9 +63,14 @@ class EntrySignal:
 
 
 def _bucket_start(dt: datetime) -> datetime:
-    epoch_minutes = int(dt.timestamp() // 60)
-    bucket_index = epoch_minutes // BUCKET_MINUTES
-    return datetime.fromtimestamp(bucket_index * BUCKET_MINUTES * 60, tz=timezone.utc)
+    local = dt.astimezone(_SESSION_TZ)
+    session_start_local = local.replace(hour=_SESSION_START_HOUR, minute=0, second=0, microsecond=0)
+    if local.hour < _SESSION_START_HOUR:
+        session_start_local -= timedelta(days=1)
+    session_start_utc = session_start_local.astimezone(timezone.utc)
+    elapsed_seconds = (dt - session_start_utc).total_seconds()
+    bucket_index = int(elapsed_seconds // (BUCKET_MINUTES * 60))
+    return session_start_utc + timedelta(minutes=bucket_index * BUCKET_MINUTES)
 
 
 def _bucket_candles(bars: list[Bar]) -> list[tuple[datetime, float, float, datetime, float, float]]:

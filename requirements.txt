@@ -4,3 +4,4 @@ jinja2
 requests
 pytest
 httpx
+tzdata
