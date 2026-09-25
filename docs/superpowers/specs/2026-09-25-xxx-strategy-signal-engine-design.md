@@ -110,10 +110,19 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 
 CREATE TABLE IF NOT EXISTS signal_status (
-    id INTEGER PRIMARY KEY CHECK (id = 1),   -- 单行表,同现有 status 表模式
-    last_bar_time TEXT                        -- 已处理到的最后一根 1 分钟 K 线时间戳,避免重复处理
+    id INTEGER PRIMARY KEY CHECK (id = 1),    -- 单行表,同现有 status 表模式
+    last_bar_time TEXT,                       -- 已处理到的最后一根 1 分钟 K 线时间戳,避免重复处理
+    last_bucket_start TEXT,                   -- 上一次已处理的完整 8 分钟桶的起始时间
+    last_bucket_alma_close REAL,              -- 该桶取样到的 ALMA(close)
+    last_bucket_alma_open REAL                -- 该桶取样到的 ALMA(open)
 );
 ```
+
+**为什么多了后三个字段(写实施计划时补的)**:判断交叉需要"上一个完整桶"和
+"当前完整桶"两个样本对比。如果每次轮询只处理自上次以来的新 K 线,某一轮可能只
+覆盖到 1 个新完整桶,这时"上一个桶"的样本已经不在这批新数据里(是上一轮处理过
+的)——所以必须把上一次算出来的桶样本存下来,下一轮取出来当"上一个桶"用,而
+不是每次都要求批次里至少凑够 2 个完整桶。
 
 `胜率 = status IN ('TP1_THEN_SL','TP2_THEN_SL','TP3_FULL') 的笔数 / 已结束(status != 'OPEN')的总笔数`——
 即"至少摸到过 TP1"算赢,纯 `SL_ONLY` 算输。`/signals/export` 同时返回完整结局分布,
