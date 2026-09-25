@@ -70,3 +70,36 @@ def test_fetch_recent_bars_raises_on_malformed_row(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
     with pytest.raises(MarketDataError):
         fetch_recent_bars("key", "XAU/USD", 200)
+
+
+def test_fetch_recent_bars_raises_on_null_field_in_row(monkeypatch):
+    # Test that None values in OHLC fields are caught and raise MarketDataError
+    payload = {
+        "status": "ok",
+        "values": [
+            {"datetime": "2026-09-25 10:01:00", "open": None, "high": "1", "low": "1", "close": "1"}
+        ],
+    }
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
+    with pytest.raises(MarketDataError):
+        fetch_recent_bars("key", "XAU/USD", 200)
+
+
+def test_fetch_recent_bars_raises_on_null_datetime(monkeypatch):
+    # Test that None datetime is caught and raises MarketDataError
+    payload = {
+        "status": "ok",
+        "values": [
+            {"datetime": None, "open": "1", "high": "1", "low": "1", "close": "1"}
+        ],
+    }
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(payload))
+    with pytest.raises(MarketDataError):
+        fetch_recent_bars("key", "XAU/USD", 200)
+
+
+def test_fetch_recent_bars_raises_on_null_response_body(monkeypatch):
+    # Test that a null JSON response body is caught and raises MarketDataError
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(None))
+    with pytest.raises(MarketDataError):
+        fetch_recent_bars("key", "XAU/USD", 200)

@@ -37,6 +37,9 @@ def fetch_recent_bars(api_key: str, symbol: str, outputsize: int) -> list[Bar]:
     except requests.RequestException as e:
         raise MarketDataError(str(e)) from e
 
+    if not isinstance(data, dict):
+        raise MarketDataError(f"unexpected response shape: {data!r}")
+
     if data.get("status") == "error":
         raise MarketDataError(data.get("message", "unknown Twelve Data error"))
 
@@ -52,7 +55,7 @@ def fetch_recent_bars(api_key: str, symbol: str, outputsize: int) -> list[Bar]:
                 low=float(v["low"]),
                 close=float(v["close"]),
             )
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, TypeError) as e:
             raise MarketDataError(f"malformed bar: {v}") from e
 
     return sorted(seen.values(), key=lambda b: b.time)
