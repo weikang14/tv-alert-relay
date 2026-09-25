@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 from market_data import Bar
-from signal_engine import bucket_samples, detect_entries
+from signal_engine import bucket_samples, detect_entries, evaluate_signal
 
 
 def _bar(minute: int, o: float, h: float, l: float, c: float) -> Bar:
@@ -69,3 +69,59 @@ def test_detect_entries_emits_nothing_without_a_crossover():
                         "bar_time": datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc), "bar_close": 102.0})(),
     ]
     assert detect_entries(samples) == []
+
+
+def test_evaluate_signal_long_hits_sl_only():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [_bar(16, 100, 100, 99.85, 99.9)]  # low 99.85 <= 100 * (1 - 0.1/100) = 99.9
+    tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
+    assert tier == 0
+    assert status == "SL_ONLY"
+
+
+def test_evaluate_signal_long_advances_through_all_tiers():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [
+        _bar(16, 100, 100.25, 100, 100.2),   # high >= 100.2 (TP1 = +0.2%)
+        _bar(17, 100.2, 100.4, 100.2, 100.3),  # high >= 100.35 (TP2 = +0.35%)
+        _bar(18, 100.3, 100.5, 100.3, 100.45),  # high >= 100.45 (TP3 = +0.45%)
+    ]
+    tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
+    assert tier == 3
+    assert status == "TP3_FULL"
+
+
+def test_evaluate_signal_short_hits_tp1_then_sl():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [
+        _bar(16, 100, 100, 99.79, 99.8),   # low <= 99.8 (TP1 short = -0.2%)
+        _bar(17, 99.8, 100.15, 99.8, 100.1),  # high >= 100.1 (SL short = +0.1%)
+    ]
+    tier, status = evaluate_signal("short", 100.0, entry_time, 0, bars)
+    assert tier == 1
+    assert status == "TP1_THEN_SL"
+
+
+def test_evaluate_signal_prioritizes_tp_over_sl_in_same_bar():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    # single bar's range covers both TP1 (100.2) and SL (99.9) for a long entry
+    bars = [_bar(16, 100, 100.3, 99.8, 100.0)]
+    tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
+    assert tier == 1
+    assert status is None  # advanced to TP1, still open, not closed by SL
+
+
+def test_evaluate_signal_ignores_bars_at_or_before_entry_time():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [_bar(15, 100, 100, 90, 90)]  # would be SL, but is the entry bar itself
+    tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
+    assert tier == 0
+    assert status is None
+
+
+def test_evaluate_signal_no_change_when_no_bars_qualify():
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    bars = [_bar(16, 100, 100.05, 99.95, 100.0)]  # inside all thresholds
+    tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
+    assert tier == 0
+    assert status is None
