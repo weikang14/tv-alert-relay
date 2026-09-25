@@ -201,10 +201,10 @@ def test_signals_export_requires_auth():
 
 def test_signals_export_returns_summary_and_distribution():
     conn = db_module.connect(":memory:")
-    db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00")
-    db_module.update_signal(conn, 1, 3, "TP3_FULL", "2026-09-25T10:40:00+00:00")
-    db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00")
-    db_module.update_signal(conn, 2, 0, "SL_ONLY", "2026-09-25T11:20:00+00:00")
+    db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00", 100.1, 99.9)
+    db_module.update_signal(conn, 1, 3, "TP3_FULL", "2026-09-25T10:40:00+00:00", 100.5, 100.3)
+    db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00", 100.1, 99.9)
+    db_module.update_signal(conn, 2, 0, "SL_ONLY", "2026-09-25T11:20:00+00:00", 100.2, 99.8)
     app.dependency_overrides[get_config] = lambda: make_cfg()
     app.dependency_overrides[get_db] = lambda: conn
     client = TestClient(app)

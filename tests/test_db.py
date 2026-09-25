@@ -34,30 +34,37 @@ def test_record_poll_success_resets_consecutive_errors():
 
 def test_insert_signal_and_open_signals():
     conn = db.connect(":memory:")
-    signal_id = db.insert_signal(conn, "long", 3650.5, "2026-09-25T10:08:00+00:00")
+    signal_id = db.insert_signal(conn, "long", 3650.5, "2026-09-25T10:08:00+00:00", 3651.0, 3650.0)
     open_ = db.open_signals(conn)
     assert len(open_) == 1
     assert open_[0]["id"] == signal_id
     assert open_[0]["direction"] == "long"
     assert open_[0]["status"] == "OPEN"
     assert open_[0]["highest_tier"] == 0
+    assert open_[0]["entry_high"] == 3651.0
+    assert open_[0]["entry_low"] == 3650.0
+    # last_bar_high/low seed from the entry bar's own high/low
+    assert open_[0]["last_bar_high"] == 3651.0
+    assert open_[0]["last_bar_low"] == 3650.0
 
 
 def test_update_signal_changes_status_and_excludes_from_open():
     conn = db.connect(":memory:")
-    signal_id = db.insert_signal(conn, "short", 3650.5, "2026-09-25T10:08:00+00:00")
-    db.update_signal(conn, signal_id, 3, "TP3_FULL", "2026-09-25T10:30:00+00:00")
+    signal_id = db.insert_signal(conn, "short", 3650.5, "2026-09-25T10:08:00+00:00", 3651.0, 3650.0)
+    db.update_signal(conn, signal_id, 3, "TP3_FULL", "2026-09-25T10:30:00+00:00", 3660.0, 3655.0)
     assert db.open_signals(conn) == []
     rows = db.recent_signals(conn)
     assert rows[0]["status"] == "TP3_FULL"
     assert rows[0]["highest_tier"] == 3
     assert rows[0]["exited_at"] == "2026-09-25T10:30:00+00:00"
+    assert rows[0]["last_bar_high"] == 3660.0
+    assert rows[0]["last_bar_low"] == 3655.0
 
 
 def test_recent_signals_most_recent_first():
     conn = db.connect(":memory:")
-    db.insert_signal(conn, "long", 1.0, "2026-09-25T10:00:00+00:00")
-    db.insert_signal(conn, "short", 2.0, "2026-09-25T10:08:00+00:00")
+    db.insert_signal(conn, "long", 1.0, "2026-09-25T10:00:00+00:00", 1.1, 0.9)
+    db.insert_signal(conn, "short", 2.0, "2026-09-25T10:08:00+00:00", 2.1, 1.9)
     rows = db.recent_signals(conn)
     assert rows[0]["direction"] == "short"
 
@@ -71,8 +78,8 @@ def test_last_bar_time_defaults_to_none_then_roundtrips():
     assert db.get_last_bar_time(conn) == "2026-09-25T10:09:00+00:00"
 
 
-def test_last_bucket_sample_defaults_to_none_then_roundtrips():
+def test_last_bucket_carry_defaults_to_none_then_roundtrips():
     conn = db.connect(":memory:")
-    assert db.get_last_bucket_sample(conn) is None
-    db.set_last_bucket_sample(conn, "2026-09-25T10:08:00+00:00", 3650.1, 3650.2)
-    assert db.get_last_bucket_sample(conn) == ("2026-09-25T10:08:00+00:00", 3650.1, 3650.2)
+    assert db.get_last_bucket_carry(conn) is None
+    db.set_last_bucket_carry(conn, "2026-09-25T10:08:00+00:00", 3649.0, 3650.5, 3650.1, 3650.2)
+    assert db.get_last_bucket_carry(conn) == ("2026-09-25T10:08:00+00:00", 3649.0, 3650.5, 3650.1, 3650.2)

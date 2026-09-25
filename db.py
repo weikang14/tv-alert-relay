@@ -23,15 +23,21 @@ CREATE TABLE IF NOT EXISTS signals (
     direction TEXT NOT NULL,
     entry_price REAL NOT NULL,
     entry_time TEXT NOT NULL,
+    entry_high REAL NOT NULL,
+    entry_low REAL NOT NULL,
     highest_tier INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'OPEN',
-    exited_at TEXT
+    exited_at TEXT,
+    last_bar_high REAL,
+    last_bar_low REAL
 );
 
 CREATE TABLE IF NOT EXISTS signal_status (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_bar_time TEXT,
     last_bucket_start TEXT,
+    last_bucket_open REAL,
+    last_bucket_close REAL,
     last_bucket_alma_close REAL,
     last_bucket_alma_open REAL
 );
@@ -85,11 +91,15 @@ def get_status(conn: sqlite3.Connection) -> sqlite3.Row:
     return conn.execute("SELECT * FROM status WHERE id = 1").fetchone()
 
 
-def insert_signal(conn: sqlite3.Connection, direction: str, entry_price: float, entry_time: str) -> int:
+def insert_signal(
+    conn: sqlite3.Connection, direction: str, entry_price: float, entry_time: str,
+    entry_high: float, entry_low: float,
+) -> int:
     cur = conn.execute(
-        "INSERT INTO signals (direction, entry_price, entry_time, highest_tier, status) "
-        "VALUES (?, ?, ?, 0, 'OPEN')",
-        (direction, entry_price, entry_time),
+        "INSERT INTO signals (direction, entry_price, entry_time, entry_high, entry_low, "
+        "highest_tier, status, last_bar_high, last_bar_low) "
+        "VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)",
+        (direction, entry_price, entry_time, entry_high, entry_low, entry_high, entry_low),
     )
     conn.commit()
     return cur.lastrowid
@@ -99,10 +109,14 @@ def open_signals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM signals WHERE status = 'OPEN' ORDER BY id").fetchall()
 
 
-def update_signal(conn: sqlite3.Connection, signal_id: int, highest_tier: int, status: str, exited_at: str | None) -> None:
+def update_signal(
+    conn: sqlite3.Connection, signal_id: int, highest_tier: int, status: str, exited_at: str | None,
+    last_bar_high: float, last_bar_low: float,
+) -> None:
     conn.execute(
-        "UPDATE signals SET highest_tier = ?, status = ?, exited_at = ? WHERE id = ?",
-        (highest_tier, status, exited_at, signal_id),
+        "UPDATE signals SET highest_tier = ?, status = ?, exited_at = ?, "
+        "last_bar_high = ?, last_bar_low = ? WHERE id = ?",
+        (highest_tier, status, exited_at, last_bar_high, last_bar_low, signal_id),
     )
     conn.commit()
 
@@ -121,18 +135,26 @@ def set_last_bar_time(conn: sqlite3.Connection, value: str) -> None:
     conn.commit()
 
 
-def get_last_bucket_sample(conn: sqlite3.Connection) -> tuple[str, float, float] | None:
+def get_last_bucket_carry(conn: sqlite3.Connection) -> tuple[str, float, float, float, float] | None:
     row = conn.execute(
-        "SELECT last_bucket_start, last_bucket_alma_close, last_bucket_alma_open FROM signal_status WHERE id = 1"
+        "SELECT last_bucket_start, last_bucket_open, last_bucket_close, "
+        "last_bucket_alma_close, last_bucket_alma_open FROM signal_status WHERE id = 1"
     ).fetchone()
     if row is None or row["last_bucket_start"] is None:
         return None
-    return row["last_bucket_start"], row["last_bucket_alma_close"], row["last_bucket_alma_open"]
+    return (
+        row["last_bucket_start"], row["last_bucket_open"], row["last_bucket_close"],
+        row["last_bucket_alma_close"], row["last_bucket_alma_open"],
+    )
 
 
-def set_last_bucket_sample(conn: sqlite3.Connection, bucket_start: str, alma_close: float, alma_open: float) -> None:
+def set_last_bucket_carry(
+    conn: sqlite3.Connection, bucket_start: str, bucket_open: float, bucket_close: float,
+    alma_close: float, alma_open: float,
+) -> None:
     conn.execute(
-        "UPDATE signal_status SET last_bucket_start = ?, last_bucket_alma_close = ?, last_bucket_alma_open = ? WHERE id = 1",
-        (bucket_start, alma_close, alma_open),
+        "UPDATE signal_status SET last_bucket_start = ?, last_bucket_open = ?, last_bucket_close = ?, "
+        "last_bucket_alma_close = ?, last_bucket_alma_open = ? WHERE id = 1",
+        (bucket_start, bucket_open, bucket_close, alma_close, alma_open),
     )
     conn.commit()

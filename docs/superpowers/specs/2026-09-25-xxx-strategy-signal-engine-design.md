@@ -1,7 +1,8 @@
 # XXX 策略信号引擎(免订阅复刻)— 设计
 
 日期:2026-09-25
-状态:已确认
+状态:已确认(2026-09-25 更正:拿到真实 Pine 源码后发现第五节第 1 点的算法
+理解是反的,已更正为"在每个 8 分钟桶自己的开高低收上算 ALMA",详见该节说明)
 
 ## 背景
 
@@ -57,11 +58,14 @@ POST /poll  ──┬─→ 现有:Gmail 轮询(价格警报邮件转发,不动)
               └─→ 新增:signal_engine.poll_once()
                         │
                         ├─ 1. 拉 Twelve Data 最近的 1 分钟 K 线(自上次处理点以来)
-                        ├─ 2. 本地重采样成 8 分钟桶,算 ALMA(2,5,0.85) 交叉
-                        │     → 有入场信号就推 Telegram + 写入 signals 表
+                        ├─ 2. 本地把 1 分钟 K 线聚合成 8 分钟"桶蜡烛"(开=桶内
+                        │     第一根的开,收=桶内最后一根的收),在桶蜡烛序列上
+                        │     算 ALMA(2,5,0.85) 交叉 → 有入场信号就推 Telegram
+                        │     + 写入 signals 表
                         └─ 3. 对所有 status='OPEN' 的信号,用这批 1 分钟 K 线
-                              逐根检查 TP1→TP2→TP3/SL,推进状态;
-                              结束的信号推一条 Telegram「结局播报」
+                              逐根检查 TP1→TP2→TP3/SL(要求真正"穿越",不是
+                              "已经越过"),推进状态;结束的信号推一条
+                              Telegram「结局播报」
 ```
 
 ## 三、行情数据源:Twelve Data
@@ -104,25 +108,32 @@ CREATE TABLE IF NOT EXISTS signals (
     direction TEXT NOT NULL,        -- 'long' | 'short'
     entry_price REAL NOT NULL,
     entry_time TEXT NOT NULL,       -- ISO8601 UTC
+    entry_high REAL NOT NULL,       -- 入场那根 1 分钟 K 线自己的高点
+    entry_low REAL NOT NULL,        -- 入场那根 1 分钟 K 线自己的低点
     highest_tier INTEGER NOT NULL DEFAULT 0,  -- 0=尚未中任何TP, 1/2/3=已到TP1/2/3
     status TEXT NOT NULL DEFAULT 'OPEN',      -- OPEN | SL_ONLY | TP1_THEN_SL | TP2_THEN_SL | TP3_FULL
-    exited_at TEXT                    -- ISO8601 UTC, OPEN 时为 NULL
+    exited_at TEXT,                   -- ISO8601 UTC(出场那根 K 线的时间,不是轮询时间),OPEN 时为 NULL
+    last_bar_high REAL,                -- 上一次评估到的 K 线高点(穿越判断要用,见第五节第 3 点)
+    last_bar_low REAL                  -- 上一次评估到的 K 线低点
 );
 
 CREATE TABLE IF NOT EXISTS signal_status (
     id INTEGER PRIMARY KEY CHECK (id = 1),    -- 单行表,同现有 status 表模式
     last_bar_time TEXT,                       -- 已处理到的最后一根 1 分钟 K 线时间戳,避免重复处理
-    last_bucket_start TEXT,                   -- 上一次已处理的完整 8 分钟桶的起始时间
-    last_bucket_alma_close REAL,              -- 该桶取样到的 ALMA(close)
-    last_bucket_alma_open REAL                -- 该桶取样到的 ALMA(open)
+    last_bucket_start TEXT,                   -- 上一次已处理的完整 8 分钟"桶蜡烛"的起始时间
+    last_bucket_open REAL,                    -- 该桶蜡烛的开(下一桶算 ALMA 需要的历史值)
+    last_bucket_close REAL,                   -- 该桶蜡烛的收
+    last_bucket_alma_close REAL,              -- 该桶算出来的 ALMA(close),交叉对比用
+    last_bucket_alma_open REAL                -- 该桶算出来的 ALMA(open)
 );
 ```
 
-**为什么多了后三个字段(写实施计划时补的)**:判断交叉需要"上一个完整桶"和
-"当前完整桶"两个样本对比。如果每次轮询只处理自上次以来的新 K 线,某一轮可能只
-覆盖到 1 个新完整桶,这时"上一个桶"的样本已经不在这批新数据里(是上一轮处理过
-的)——所以必须把上一次算出来的桶样本存下来,下一轮取出来当"上一个桶"用,而
-不是每次都要求批次里至少凑够 2 个完整桶。
+**为什么这些字段比最初想的多(写实施计划、以及后来拿到真实源码改算法时陆续补
+的)**:ALMA(长度2)算一个新桶的值,需要"这个桶"和"上一个桶"两根桶蜡烛的开/收;
+判断交叉又需要"上一个桶"和"当前桶"两个已经算出来的 ALMA 值做对比。如果每次
+轮询只处理自上次以来的新 K 线,某一轮可能只覆盖到 1 个新完整桶,这时"上一个
+桶"的原始开收和 ALMA 值都已经不在这批新数据里(是上一轮处理过的)——所以必须
+把上一次算出来的桶蜡烛开收 + ALMA 值都存下来,下一轮取出来接着用。
 
 `胜率 = status IN ('TP1_THEN_SL','TP2_THEN_SL','TP3_FULL') 的笔数 / 已结束(status != 'OPEN')的总笔数`——
 即"至少摸到过 TP1"算赢,纯 `SL_ONLY` 算输。`/signals/export` 同时返回完整结局分布,
@@ -139,14 +150,32 @@ CREATE TABLE IF NOT EXISTS signal_status (
    ```
    本设计里 `length=2, sigma=5, offset=0.85`,分别对 1 分钟收盘价序列和开盘价序列
    各算一份连续的 ALMA。
-1. **ALMA 计算顺序**:脚本是"先在 1 分钟收盘/开盘价上连续计算 ALMA,再按 8 分钟
-   边界取样"(`closeSeriesAlt = reso(closeSeries, ...)`,`closeSeries` 本身已经是
-   基于 1 分钟数据算出来的连续 ALMA 序列),**不是**"先把 1 分钟 K 线合成 8 分钟
-   K 线,再对 8 分钟 K 线算 ALMA"——这两种算法数值结果不同,必须照前者复刻。
+1. **ALMA 计算顺序(2026-09-25 更正,拿到真实源码后重新确认)**:最初这里写的是
+   "先在 1 分钟收盘/开盘价上连续计算 ALMA,再按 8 分钟边界取样"——**这个理解是
+   错的**,已经用真实 Pine 源码验证并推翻。真实机制:`closeSeriesAlt =
+   request.security(syminfo.tickerid, "8", closeSeries)`,而 `closeSeries` 是一个
+   由 `close`(内建变量)和几个 `input()` 参数算出来的表达式,不含任何依赖 1
+   分钟图专属状态的东西。Pine 的 `request.security()` 对这种"纯粹由内建量+输入
+   参数算出的表达式"会**在目标分辨率的原生 K 线上重新执行整个计算**,不是把当前
+   分辨率已经算好的序列拿去做重采样/取样。也就是说 ALMA(2,0.85,5) 实际上是算在
+   **每个 8 分钟桶自己的开(桶内第一根 1 分钟的开)和收(桶内最后一根 1 分钟的
+   收)** 上,等于把每 8 根 1 分钟 K 线合成一根 8 分钟蜡烛,再对这个蜡烛序列算
+   ALMA——**正是当初设计时特意排除掉的"重采样再算 ALMA"那条路线**。已改正,
+   `signal_engine.bucket_samples()` 现在按这个（正确）算法实现。
 2. **SL 价位入场后固定不变**:`slLine` 只在开仓那一刻计算一次,后续 TP1/TP2/TP3
    推进不会移动止损线,状态机不需要处理"移动止损"。
-3. **同一根 1 分钟 K 线内 TP 和 SL 都被摸到时,TP 优先记账**——照抄脚本 `switch`
-   语句里 TP 分支排在 SL 分支前面的裁决顺序。
+3. **TP/SL 判断要求真正"穿越",不是"已经越过"(2026-09-25 补,同样是看了真实源码
+   才发现)**:脚本每一处 TP/SL 判断都是用 `f_cross()`(等价于
+   `ta.crossover`/`ta.crossunder`):`_scr1 > _scr2 and _scr1[1] < _scr2[1]`——要求
+   **上一根 K 线严格在线的另一侧**,不是"这根 K 线的高/低已经越过阈值"就算数。
+   由于 SL(0.1%)、TP1(0.2%)这些阈值相对黄金 1 分钟波动非常窄,这个区别在实盘
+   里会经常影响判断,不是罕见边界情况。已改正:`evaluate_signal()` 现在要求
+   "上一根 K 线的高/低"严格在阈值另一侧才算命中,`signals` 表新增
+   `entry_high`/`entry_low`(入场那根 K 线自己的高低,给第一次判断当参照)和
+   `last_bar_high`/`last_bar_low`(每次轮询后更新,给下一次判断当参照)。
+   另外确认了 `switch` 语句本身每根 K 线只会走一个分支(标准 switch/case 语义,
+   不会在同一根 K 线内连续推进多级),所以"一根 K 线最多推进一级"这个原有实现
+   是对的,不需要改。
 4. **已知复刻限制(有意为之,不追求 100% 一致)**:脚本用
    `request.security(..., lookahead = barmerge.lookahead_on)` 拉高周期数据,理论上
    在"当前尚未收盘的 8 分钟桶"上存在实时重绘的可能(尽管脚本分组标注写的是
@@ -169,7 +198,9 @@ CREATE TABLE IF NOT EXISTS signal_status (
 
 - `alma.py`:纯函数单元测试,构造已知输入序列验证 ALMA 输出数值。
 - `signal_engine.py`:mock 一串构造好的 1 分钟 K 线,断言:
-  - 正确识别入场交叉(含"先在 1 分钟连续算 ALMA 再 8 分钟取样"这个顺序)
+  - 正确识别入场交叉(含"ALMA 算在每个 8 分钟桶自己的开收上"这个聚合方式,以及
+    "桶蜡烛的开必须来自桶内第一根 K 线,不能用轮询过滤后剩下的那一根"这条边界)
+  - TP/SL 判断要求真正的穿越(上一根 K 线严格在阈值另一侧),不是"已经越过"
   - 同一根 K 线内 TP 和 SL 都命中时,优先记 TP
   - 状态机正确推进到 `TP3_FULL`,或在任一环节提前 `*_THEN_SL`/`SL_ONLY` 退出
   - `last_bar_time` 正确推进,不重复处理已处理过的 K 线
