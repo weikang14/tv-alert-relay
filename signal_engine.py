@@ -191,6 +191,31 @@ def evaluate_signal(
     return tier, None, prev_high, prev_low, exit_bar_time
 
 
+def _evaluate_open_signals(conn, bars_segment: list[Bar], now: datetime, tg_bot_token: str, tg_chat_id: str) -> None:
+    """Runs one TP/SL pass over every currently-OPEN signal using
+    `bars_segment`. Callers must pass only the bars that lie chronologically
+    BEFORE the next entry/reversal this poll will process — never the whole
+    poll's bar batch in one call when the poll contains more than one entry,
+    or a signal's own TP1/2/3/SL between its entry and a later reversal
+    would never be checked (see poll_once)."""
+    if not bars_segment:
+        return
+    for sig in db.open_signals(conn):
+        new_tier, closing_status, new_prev_high, new_prev_low, exit_bar_time = evaluate_signal(
+            sig["direction"], sig["entry_price"], datetime.fromisoformat(sig["entry_time"]),
+            sig["highest_tier"], sig["last_bar_high"], sig["last_bar_low"], bars_segment,
+        )
+        if closing_status is not None:
+            exited_at = exit_bar_time.isoformat() if exit_bar_time is not None else now.isoformat()
+            db.update_signal(conn, sig["id"], new_tier, closing_status, exited_at, new_prev_high, new_prev_low)
+            text = f"\U0001F3C1 Signal #{sig['id']} closed: {closing_status}"
+            ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
+            if not ok:
+                log.error("signal result telegram send failed: %s", error)
+        elif new_tier != sig["highest_tier"] or new_prev_high != sig["last_bar_high"] or new_prev_low != sig["last_bar_low"]:
+            db.update_signal(conn, sig["id"], new_tier, "OPEN", None, new_prev_high, new_prev_low)
+
+
 def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: str, now: datetime | None = None) -> None:
     if not api_key:
         return
@@ -258,26 +283,27 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
 
         entries = detect_entries(all_samples)
 
-        # TP/SL runs BEFORE reversal handling below: a signal that legitimately
-        # hits its own TP3/SL within this batch must close on those terms, not
-        # be pre-empted by a same-poll reversal using a stale tier.
-        for sig in db.open_signals(conn):
-            new_tier, closing_status, new_prev_high, new_prev_low, exit_bar_time = evaluate_signal(
-                sig["direction"], sig["entry_price"], datetime.fromisoformat(sig["entry_time"]),
-                sig["highest_tier"], sig["last_bar_high"], sig["last_bar_low"], bars,
-            )
-            if closing_status is not None:
-                exited_at = exit_bar_time.isoformat() if exit_bar_time is not None else now.isoformat()
-                db.update_signal(conn, sig["id"], new_tier, closing_status, exited_at, new_prev_high, new_prev_low)
-                text = f"\U0001F3C1 Signal #{sig['id']} closed: {closing_status}"
-                ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
-                if not ok:
-                    log.error("signal result telegram send failed: %s", error)
-            elif new_tier != sig["highest_tier"] or new_prev_high != sig["last_bar_high"] or new_prev_low != sig["last_bar_low"]:
-                db.update_signal(conn, sig["id"], new_tier, "OPEN", None, new_prev_high, new_prev_low)
-
+        # A poll batch can contain more than one entry (cold start replaying
+        # 200 bars, or catching up after an outage spanning several bucket
+        # cycles) — each entry's own TP/SL must still be checked against the
+        # bars between ITS entry and the next one, or a signal opened earlier
+        # in this same batch would only ever get REVERSED_ONLY, never a
+        # chance at its own TP1/2/3/SL. So TP/SL and entry/reversal handling
+        # are interleaved in chronological bar order, not run as two
+        # separate batch passes over the whole poll.
+        bar_cursor = 0
         pushed = 0
         for entry in entries:
+            segment = []
+            while bar_cursor < len(bars) and bars[bar_cursor].time <= entry.entry_time:
+                segment.append(bars[bar_cursor])
+                bar_cursor += 1
+            # TP/SL runs BEFORE reversal handling below: a signal that
+            # legitimately hits its own TP3/SL on or before this entry's bar
+            # must close on those terms, not be pre-empted by this entry's
+            # reversal using a stale tier.
+            _evaluate_open_signals(conn, segment, now, tg_bot_token, tg_chat_id)
+
             is_stale = (now - entry.entry_time) > timedelta(minutes=2 * BUCKET_MINUTES)
 
             # Pine's strategy.entry() (pyramiding=0) reverses the position on
@@ -313,6 +339,10 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
             ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
             if not ok:
                 log.error("signal entry telegram send failed: %s", error)
+
+        # Final TP/SL pass for whatever's still open, using any bars after
+        # the last entry (or all of `bars`, when this poll had no entries).
+        _evaluate_open_signals(conn, bars[bar_cursor:], now, tg_bot_token, tg_chat_id)
 
         if new_samples:
             last_sample = new_samples[-1]

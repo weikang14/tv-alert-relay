@@ -522,6 +522,35 @@ def test_poll_once_reversal_close_not_pushed_when_entry_is_stale():
     assert not fake_send.called  # neither the reversal close nor the new entry was pushed
 
 
+def test_poll_once_evaluates_tp_sl_between_two_entries_in_the_same_poll():
+    # Regression: a poll batch can contain more than one entry (cold-start
+    # bootstrap replay, or catching up after an outage spanning several
+    # bucket cycles). The first entry's own TP/SL must still be checked
+    # against the bars between it and the next (reversing) entry — not
+    # skipped straight to REVERSED_ONLY just because a later entry lands in
+    # the same poll.
+    conn = db_module.connect(":memory:")
+    bucket0 = _bucket_bars(0, 101, 101, 101, 100)
+    bucket1 = _bucket_bars(1, 101, 101, 101, 100)
+    bucket2 = _bucket_bars(2, 100, 101, 100, 101)  # -> LONG entry: price=101, high=101, low=100
+    bucket3 = (
+        [_bar_at(3, 0, 101, 101, 101, 100)]
+        + [_bar_at(3, 1, 100, 101.3, 100, 100.5)]  # high=101.3 crosses LONG's TP1 (101.202)
+        + [_bar_at(3, i, 100, 100.5, 99.5, 100) for i in range(2, INT_RES - 1)]
+        + [_bar_at(3, INT_RES - 1, 100.2, 100.5, 99.5, 100)]  # bucket close=100 -> SHORT entry (reverses)
+    )
+    bars = bucket0 + bucket1 + bucket2 + bucket3
+    with patch("signal_engine.fetch_recent_bars", return_value=bars), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=_shortly_after(bars))
+    rows = db_module.recent_signals(conn)
+    long_row = next(r for r in rows if r["direction"] == "long")
+    short_row = next(r for r in rows if r["direction"] == "short")
+    assert long_row["status"] == "TP1_THEN_REVERSED"
+    assert long_row["highest_tier"] == 1
+    assert short_row["status"] == "OPEN"
+
+
 def test_poll_once_suppresses_push_but_still_records_stale_entries_on_bootstrap():
     # I1: a bootstrap/long-outage backlog must not be PUSHED as if it just
     # happened, but must still be RECORDED for win-rate history.
