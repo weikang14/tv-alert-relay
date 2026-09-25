@@ -27,3 +27,7 @@ services:
         value: "300"
       - key: HEALTHZ_SHARED_SECRET
         sync: false
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      - key: SIGNAL_SYMBOL
+        value: XAU/USD
