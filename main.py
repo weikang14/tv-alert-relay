@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 import threading
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 import db as db_module
+import signal_engine
 from config import Config, load_config
 from health import compute_health
 from imap_client import GMAIL_IMAP_HOST
@@ -40,9 +42,21 @@ def _poll(cfg: Config, conn) -> None:
         )
 
 
+_signal_poll_lock = threading.Lock()
+
+
+def _poll_signals(cfg: Config, conn) -> None:
+    with _signal_poll_lock:
+        try:
+            signal_engine.poll_once(conn, cfg.twelve_data_api_key, cfg.signal_symbol, cfg.tg_bot_token, cfg.tg_chat_id)
+        except Exception:
+            logging.getLogger(__name__).exception("signal engine poll failed")
+
+
 async def _poll_loop(cfg: Config, conn) -> None:
     while True:
         await asyncio.to_thread(_poll, cfg, conn)
+        await asyncio.to_thread(_poll_signals, cfg, conn)
         await asyncio.sleep(cfg.poll_interval_seconds)
 
 
@@ -119,6 +133,7 @@ def trigger_poll(
     _auth: None = Depends(check_auth),
 ):
     _poll(cfg, conn)
+    _poll_signals(cfg, conn)
     status = db_module.get_status(conn)
     healthy = compute_health(
         _parse_dt(status["last_poll_at"]), status["consecutive_errors"],
@@ -141,8 +156,28 @@ def export_alerts(conn=Depends(get_db), _auth: None = Depends(check_auth)):
     })
 
 
+@app.get("/signals/export")
+def export_signals(conn=Depends(get_db), _auth: None = Depends(check_auth)):
+    rows = db_module.recent_signals(conn, limit=100000)
+    signals = [dict(row) for row in rows]
+    closed = [s for s in signals if s["status"] != "OPEN"]
+    wins = [s for s in closed if s["status"] in ("TP1_THEN_SL", "TP2_THEN_SL", "TP3_FULL")]
+    distribution: dict[str, int] = {}
+    for s in signals:
+        distribution[s["status"]] = distribution.get(s["status"], 0) + 1
+    return JSONResponse({
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "signals": signals,
+        "summary": {
+            "total_closed": len(closed),
+            "wins": len(wins),
+            "win_rate": (len(wins) / len(closed)) if closed else None,
+            "distribution": distribution,
+        },
+    })
+
+
 if __name__ == "__main__":
-    import logging
     import os
     import uvicorn
     logging.basicConfig(level=logging.INFO)

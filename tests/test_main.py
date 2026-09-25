@@ -17,7 +17,7 @@ def make_cfg(**overrides):
         gmail_user="u", gmail_app_password="p", tg_bot_token="t", tg_chat_id="c",
         web_user="admin", web_password="secret", db_path=":memory:",
         tv_sender="noreply@tradingview.com", poll_interval_seconds=300,
-        healthz_shared_secret="",
+        healthz_shared_secret="", twelve_data_api_key="", signal_symbol="XAU/USD",
     )
     base.update(overrides)
     return Config(**base)
@@ -189,3 +189,69 @@ def test_export_returns_all_alerts_as_json():
     errored = [a for a in data["alerts"] if a["subject"] == "Subj2"][0]
     assert errored["sent_ok"] == 0
     assert errored["error"] == "boom"
+
+
+def test_signals_export_requires_auth():
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    client = TestClient(app)
+    resp = client.get("/signals/export")
+    assert resp.status_code == 401
+
+
+def test_signals_export_returns_summary_and_distribution():
+    conn = db_module.connect(":memory:")
+    db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00")
+    db_module.update_signal(conn, 1, 3, "TP3_FULL", "2026-09-25T10:40:00+00:00")
+    db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00")
+    db_module.update_signal(conn, 2, 0, "SL_ONLY", "2026-09-25T11:20:00+00:00")
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: conn
+    client = TestClient(app)
+    resp = client.get("/signals/export", auth=("admin", "secret"))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["signals"]) == 2
+    assert data["summary"]["total_closed"] == 2
+    assert data["summary"]["wins"] == 1
+    assert data["summary"]["win_rate"] == 0.5
+    assert data["summary"]["distribution"]["TP3_FULL"] == 1
+    assert data["summary"]["distribution"]["SL_ONLY"] == 1
+
+
+def test_poll_route_triggers_signal_engine_alongside_gmail_poll(monkeypatch):
+    conn = db_module.connect(":memory:")
+    calls = []
+
+    def fake_poll_once(conn_arg, *args):
+        db_module.record_poll(conn_arg, success=True)
+
+    def fake_signal_poll_once(conn_arg, api_key, symbol, tok, chat):
+        calls.append((api_key, symbol))
+
+    monkeypatch.setattr(main_module, "poll_once", fake_poll_once)
+    monkeypatch.setattr(main_module.signal_engine, "poll_once", fake_signal_poll_once)
+    app.dependency_overrides[get_config] = lambda: make_cfg(twelve_data_api_key="td-key", signal_symbol="XAU/USD")
+    app.dependency_overrides[get_db] = lambda: conn
+    client = TestClient(app)
+    resp = client.post("/poll", auth=("admin", "secret"))
+    assert resp.status_code == 200
+    assert calls == [("td-key", "XAU/USD")]
+
+
+def test_poll_route_survives_signal_engine_exception(monkeypatch):
+    conn = db_module.connect(":memory:")
+
+    def fake_poll_once(conn_arg, *args):
+        db_module.record_poll(conn_arg, success=True)
+
+    def broken_signal_poll_once(*args):
+        raise RuntimeError("signal engine exploded")
+
+    monkeypatch.setattr(main_module, "poll_once", fake_poll_once)
+    monkeypatch.setattr(main_module.signal_engine, "poll_once", broken_signal_poll_once)
+    app.dependency_overrides[get_config] = lambda: make_cfg()
+    app.dependency_overrides[get_db] = lambda: conn
+    client = TestClient(app)
+    resp = client.post("/poll", auth=("admin", "secret"))
+    assert resp.status_code == 200  # Gmail-relay health must be unaffected
