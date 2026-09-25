@@ -35,7 +35,8 @@ def fetch_recent_bars(api_key: str, symbol: str, outputsize: int) -> list[Bar]:
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
-        raise MarketDataError(str(e)) from e
+        # HTTPError text includes the request URL, which embeds the API key.
+        raise MarketDataError(str(e).replace(api_key, "<apikey>")) from e
 
     if not isinstance(data, dict):
         raise MarketDataError(f"unexpected response shape: {data!r}")

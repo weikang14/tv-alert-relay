@@ -123,31 +123,39 @@ def evaluate_signal(
     return tier, None
 
 
-def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: str) -> None:
+def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: str, now: datetime | None = None) -> None:
     if not api_key:
         return
 
+    if now is None:
+        now = datetime.now(timezone.utc)
+
     try:
         last_bar_time_str = db.get_last_bar_time(conn)
-        now = datetime.now(timezone.utc)
         if last_bar_time_str is None:
             outputsize = 200
+            last_bar_time = None
         else:
             last_bar_time = datetime.fromisoformat(last_bar_time_str)
             gap_minutes = int((now - last_bar_time).total_seconds() // 60)
             outputsize = min(200, max(1, gap_minutes + 5))
 
-        bars = fetch_recent_bars(api_key, symbol, outputsize)
+        fetched = fetch_recent_bars(api_key, symbol, outputsize)
 
-        if last_bar_time_str is not None:
-            last_bar_time = datetime.fromisoformat(last_bar_time_str)
-            bars = [b for b in bars if b.time > last_bar_time]
+        # Ignore the still-forming latest bar — its OHLC isn't final yet (C2).
+        fetched = [b for b in fetched if b.time + timedelta(minutes=1) <= now]
+
+        bars = [b for b in fetched if last_bar_time is None or b.time > last_bar_time]
 
         if not bars:
             log.info("signal poll: no new bars")
             return
 
-        new_samples = bucket_samples(bars)
+        # Sample the FULL fetch (not just the post-last_bar_time slice) so a
+        # bucket-closing bar that happens to be the first new bar still has
+        # its preceding bar available for ALMA warm-up (C1).
+        full_samples = bucket_samples(fetched)
+        new_samples = [s for s in full_samples if last_bar_time is None or s.bar_time > last_bar_time]
 
         carried = db.get_last_bucket_sample(conn)
         all_samples = list(new_samples)
@@ -163,9 +171,11 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
             all_samples = [carried_sample] + new_samples
 
         entries = detect_entries(all_samples)
-        for entry in entries:
-            db.insert_signal(conn, entry.direction, entry.entry_price, entry.entry_time.isoformat())
-            text = f"\U0001F4CA Signal Entry\n{entry.direction.upper()} @ {entry.entry_price}\n{entry.entry_time.isoformat()}"
+        # Suppress stale replays on cold start / after a long outage (I1).
+        fresh_entries = [e for e in entries if (now - e.entry_time) <= timedelta(minutes=2 * BUCKET_MINUTES)]
+        for entry in fresh_entries:
+            signal_id = db.insert_signal(conn, entry.direction, entry.entry_price, entry.entry_time.isoformat())
+            text = f"\U0001F4CA Signal Entry #{signal_id}\n{entry.direction.upper()} @ {entry.entry_price}\n{entry.entry_time.isoformat()}"
             ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
             if not ok:
                 log.error("signal entry telegram send failed: %s", error)
@@ -190,7 +200,7 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
                 conn, last_sample.bucket_start.isoformat(), last_sample.alma_close, last_sample.alma_open,
             )
         db.set_last_bar_time(conn, bars[-1].time.isoformat())
-        log.info("signal poll ok, %d new bars, %d entries", len(bars), len(entries))
+        log.info("signal poll ok, %d new bars, %d entries", len(bars), len(fresh_entries))
     except MarketDataError as e:
         log.error("signal poll: market data error: %s", e)
     except Exception:

@@ -60,6 +60,20 @@ def test_fetch_recent_bars_raises_on_http_error(monkeypatch):
         fetch_recent_bars("key", "XAU/USD", 200)
 
 
+def test_fetch_recent_bars_redacts_api_key_from_http_error(monkeypatch):
+    # requests' HTTPError text includes the request URL, which embeds apikey=...
+    def fake_get(*a, **k):
+        raise requests.HTTPError(
+            "429 Client Error: Too Many Requests for url: "
+            "https://api.twelvedata.com/time_series?symbol=XAU%2FUSD&apikey=secret-td-key"
+        )
+    monkeypatch.setattr(requests, "get", fake_get)
+    with pytest.raises(MarketDataError) as exc_info:
+        fetch_recent_bars("secret-td-key", "XAU/USD", 200)
+    assert "secret-td-key" not in str(exc_info.value)
+    assert "<apikey>" in str(exc_info.value)
+
+
 def test_fetch_recent_bars_returns_empty_list_when_no_values(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse({"status": "ok", "values": []}))
     assert fetch_recent_bars("key", "XAU/USD", 200) == []

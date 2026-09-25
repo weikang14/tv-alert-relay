@@ -159,12 +159,14 @@ def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
     bars = bucket0 + bucket1
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 17, tzinfo=timezone.utc))
     rows = db_module.recent_signals(conn)
     assert len(rows) == 1
     assert rows[0]["direction"] == "long"
     assert rows[0]["entry_price"] == 101.0
     assert fake_send.called
+    # I3: entry push carries the signal id so it can be matched to its later close push
+    assert f"Signal Entry #{rows[0]['id']}" in fake_send.call_args.args[2]
     assert db_module.get_last_bar_time(conn) == bars[-1].time.isoformat()
 
 
@@ -175,7 +177,7 @@ def test_poll_once_detects_entry_using_carried_over_bucket_sample():
     bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
     with patch("signal_engine.fetch_recent_bars", return_value=bucket1), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)):
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 17, tzinfo=timezone.utc))
     rows = db_module.recent_signals(conn)
     assert len(rows) == 1
     assert rows[0]["direction"] == "long"
@@ -188,7 +190,7 @@ def test_poll_once_survives_telegram_failure_on_entry_push():
     bars = bucket0 + bucket1
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
          patch("signal_engine.send_telegram_message", return_value=(False, "boom")):
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 17, tzinfo=timezone.utc))  # must not raise
     assert len(db_module.recent_signals(conn)) == 1  # still recorded despite push failure
 
 
@@ -206,7 +208,7 @@ def test_poll_once_closes_open_signal_and_pushes_result():
     sl_bar = _bar(16, 100, 100, 99.85, 99.9)  # triggers SL_ONLY for the open long
     with patch("signal_engine.fetch_recent_bars", return_value=[sl_bar]), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 18, tzinfo=timezone.utc))
     rows = db_module.recent_signals(conn)
     assert rows[0]["status"] == "SL_ONLY"
     assert fake_send.called
@@ -219,7 +221,7 @@ def test_poll_once_survives_telegram_failure_on_close_push():
     sl_bar = _bar(16, 100, 100, 99.85, 99.9)
     with patch("signal_engine.fetch_recent_bars", return_value=[sl_bar]), \
          patch("signal_engine.send_telegram_message", return_value=(False, "boom")):
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 18, tzinfo=timezone.utc))  # must not raise
     rows = db_module.recent_signals(conn)
     assert rows[0]["status"] == "SL_ONLY"  # still updated despite push failure
 
@@ -231,8 +233,72 @@ def test_poll_once_advances_tier_without_closing_or_pushing():
     tp1_bar = _bar(16, 100, 100.25, 100, 100.2)  # hits TP1 only, not TP2/SL
     with patch("signal_engine.fetch_recent_bars", return_value=[tp1_bar]), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
-        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=datetime(2026, 9, 25, 10, 18, tzinfo=timezone.utc))
     rows = db_module.recent_signals(conn)
     assert rows[0]["status"] == "OPEN"
     assert rows[0]["highest_tier"] == 1
     assert not fake_send.called  # no push for a tier advance that doesn't close
+
+
+def test_poll_once_detects_entry_when_closing_bar_is_first_new_bar():
+    # Regression for C1: the previous poll ended exactly one minute before
+    # bucket1's closing bar, so only that one bar is "new" this poll — but
+    # bucket1's ALMA sample still needs bucket1's earlier bars (present in
+    # the raw fetch) to compute correctly.
+    conn = db_module.connect(":memory:")
+    db_module.set_last_bar_time(conn, "2026-09-25T10:14:00+00:00")
+    db_module.set_last_bucket_sample(conn, "2026-09-25T10:00:00+00:00", 100.0, 101.0)
+    bucket0 = [_bar(m, 101, 101, 101, 100) for m in range(0, 8)]
+    bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
+    bars = bucket0 + bucket1
+    frozen_now = datetime(2026, 9, 25, 10, 17, tzinfo=timezone.utc)
+    with patch("signal_engine.fetch_recent_bars", return_value=bars), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    rows = db_module.recent_signals(conn)
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "long"
+
+
+def test_poll_once_ignores_not_yet_closed_bar():
+    # Regression for C2: a bar whose minute has not fully elapsed yet must
+    # not be treated as final.
+    conn = db_module.connect(":memory:")
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat())
+    still_forming = _bar(17, 100, 100, 99.85, 99.9)  # would trigger SL if treated as final
+    frozen_now = datetime(2026, 9, 25, 10, 17, 30, tzinfo=timezone.utc)  # inside minute 17
+    with patch("signal_engine.fetch_recent_bars", return_value=[still_forming]), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "OPEN"
+
+
+def test_poll_once_processes_bar_once_fully_closed():
+    # Companion to the above: once the minute has fully elapsed, it IS processed.
+    conn = db_module.connect(":memory:")
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat())
+    sl_bar = _bar(17, 100, 100, 99.85, 99.9)
+    frozen_now = datetime(2026, 9, 25, 10, 18, 30, tzinfo=timezone.utc)  # minute 17 fully elapsed
+    with patch("signal_engine.fetch_recent_bars", return_value=[sl_bar]), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "SL_ONLY"
+
+
+def test_poll_once_suppresses_stale_entries_on_bootstrap():
+    # Regression for I1: a bootstrap/long-outage backlog must not be pushed
+    # as if it just happened.
+    conn = db_module.connect(":memory:")
+    bucket0 = [_bar(m, 101, 101, 101, 100) for m in range(0, 8)]
+    bucket1 = [_bar(m, 100, 101, 100, 101) for m in range(8, 16)]
+    bars = bucket0 + bucket1
+    frozen_now = datetime(2026, 9, 26, 10, 0, 0, tzinfo=timezone.utc)  # a full day later
+    with patch("signal_engine.fetch_recent_bars", return_value=bars), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=frozen_now)
+    assert db_module.recent_signals(conn) == []
+    assert not fake_send.called
