@@ -3,8 +3,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import db
 from alma import alma
-from market_data import Bar
+from market_data import Bar, MarketDataError, fetch_recent_bars
+from telegram import send_telegram_message
 
 log = logging.getLogger(__name__)
 
@@ -119,3 +121,77 @@ def evaluate_signal(
             return tier, _STATUS_AFTER_SL[tier]
 
     return tier, None
+
+
+def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: str) -> None:
+    if not api_key:
+        return
+
+    try:
+        last_bar_time_str = db.get_last_bar_time(conn)
+        now = datetime.now(timezone.utc)
+        if last_bar_time_str is None:
+            outputsize = 200
+        else:
+            last_bar_time = datetime.fromisoformat(last_bar_time_str)
+            gap_minutes = int((now - last_bar_time).total_seconds() // 60)
+            outputsize = min(200, max(1, gap_minutes + 5))
+
+        bars = fetch_recent_bars(api_key, symbol, outputsize)
+
+        if last_bar_time_str is not None:
+            last_bar_time = datetime.fromisoformat(last_bar_time_str)
+            bars = [b for b in bars if b.time > last_bar_time]
+
+        if not bars:
+            log.info("signal poll: no new bars")
+            return
+
+        new_samples = bucket_samples(bars)
+
+        carried = db.get_last_bucket_sample(conn)
+        all_samples = list(new_samples)
+        if carried is not None:
+            carried_start_str, carried_close, carried_open = carried
+            carried_sample = BucketSample(
+                bucket_start=datetime.fromisoformat(carried_start_str),
+                alma_close=carried_close,
+                alma_open=carried_open,
+                bar_time=datetime.fromisoformat(carried_start_str),
+                bar_close=0.0,
+            )
+            all_samples = [carried_sample] + new_samples
+
+        entries = detect_entries(all_samples)
+        for entry in entries:
+            db.insert_signal(conn, entry.direction, entry.entry_price, entry.entry_time.isoformat())
+            text = f"\U0001F4CA Signal Entry\n{entry.direction.upper()} @ {entry.entry_price}\n{entry.entry_time.isoformat()}"
+            ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
+            if not ok:
+                log.error("signal entry telegram send failed: %s", error)
+
+        for sig in db.open_signals(conn):
+            new_tier, closing_status = evaluate_signal(
+                sig["direction"], sig["entry_price"], datetime.fromisoformat(sig["entry_time"]),
+                sig["highest_tier"], bars,
+            )
+            if closing_status is not None:
+                db.update_signal(conn, sig["id"], new_tier, closing_status, now.isoformat())
+                text = f"\U0001F3C1 Signal #{sig['id']} closed: {closing_status}"
+                ok, error = send_telegram_message(tg_bot_token, tg_chat_id, text)
+                if not ok:
+                    log.error("signal result telegram send failed: %s", error)
+            elif new_tier != sig["highest_tier"]:
+                db.update_signal(conn, sig["id"], new_tier, "OPEN", None)
+
+        if new_samples:
+            last_sample = new_samples[-1]
+            db.set_last_bucket_sample(
+                conn, last_sample.bucket_start.isoformat(), last_sample.alma_close, last_sample.alma_open,
+            )
+        db.set_last_bar_time(conn, bars[-1].time.isoformat())
+        log.info("signal poll ok, %d new bars, %d entries", len(bars), len(entries))
+    except MarketDataError as e:
+        log.error("signal poll: market data error: %s", e)
+    except Exception:
+        log.exception("signal poll failed")

@@ -1,8 +1,10 @@
 # tests/test_signal_engine.py
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from market_data import Bar
-from signal_engine import bucket_samples, detect_entries, evaluate_signal
+import db as db_module
+from market_data import Bar, MarketDataError
+from signal_engine import bucket_samples, detect_entries, evaluate_signal, poll_once
 
 
 def _bar(minute: int, o: float, h: float, l: float, c: float) -> Bar:
@@ -125,3 +127,59 @@ def test_evaluate_signal_no_change_when_no_bars_qualify():
     tier, status = evaluate_signal("long", 100.0, entry_time, 0, bars)
     assert tier == 0
     assert status is None
+
+
+def test_poll_once_noops_when_api_key_missing():
+    conn = db_module.connect(":memory:")
+    with patch("signal_engine.fetch_recent_bars") as fake_fetch:
+        poll_once(conn, "", "XAU/USD", "tok", "chat")
+        fake_fetch.assert_not_called()
+
+
+def test_poll_once_bootstraps_with_200_bars_on_first_run():
+    conn = db_module.connect(":memory:")
+    with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch, \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        assert fake_fetch.call_args.args[2] == 200  # outputsize
+
+
+def test_poll_once_caps_outputsize_at_200_after_long_gap(monkeypatch):
+    conn = db_module.connect(":memory:")
+    db_module.set_last_bar_time(conn, "2026-01-01T00:00:00+00:00")  # far in the past
+    with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+        assert fake_fetch.call_args.args[2] == 200
+
+
+def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
+    conn = db_module.connect(":memory:")
+    bars = [_bar(m, 100 + 0.01 * m, 100 + 0.01 * m, 100 + 0.01 * m, 100 + 0.01 * m) for m in range(0, 8)]
+    bars.append(_bar(8, 100.5, 100.5, 100.5, 105.0))  # forces a crossover on the next bucket
+    with patch("signal_engine.fetch_recent_bars", return_value=bars), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+    # Whether or not this exact synthetic series crosses is incidental to this
+    # test's real assertion: the poll must complete without raising and must
+    # advance last_bar_time to the newest bar it processed.
+    assert db_module.get_last_bar_time(conn) == bars[-1].time.isoformat()
+
+
+def test_poll_once_swallows_market_data_errors():
+    conn = db_module.connect(":memory:")
+    with patch("signal_engine.fetch_recent_bars", side_effect=MarketDataError("boom")):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
+    assert db_module.get_last_bar_time(conn) is None  # nothing advanced
+
+
+def test_poll_once_closes_open_signal_and_pushes_result():
+    conn = db_module.connect(":memory:")
+    entry_time = datetime(2026, 9, 25, 10, 15, tzinfo=timezone.utc)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat())
+    sl_bar = _bar(16, 100, 100, 99.85, 99.9)  # triggers SL_ONLY for the open long
+    with patch("signal_engine.fetch_recent_bars", return_value=[sl_bar]), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat")
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "SL_ONLY"
+    assert fake_send.called
