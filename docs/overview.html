@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>项目介绍</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --ink: #1a1d29;
+    --sub: #5b6272;
+    --line: #e4e7ee;
+    --bg: #ffffff;
+    --panel: #f7f8fb;
+    --accent: #2454ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 20px 80px; }
+  h1 { font-size: 30px; margin: 0 0 8px; }
+  h2 {
+    font-size: 20px;
+    margin: 48px 0 16px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--line);
+  }
+  .lede { color: var(--sub); font-size: 17px; margin-bottom: 8px; }
+  ul.features { padding-left: 20px; }
+  ul.features li { margin-bottom: 10px; }
+  ul.features b { color: var(--ink); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--sub); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .03em; }
+  td:first-child { white-space: nowrap; font-weight: 600; }
+  .diagram {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+    overflow-x: auto;
+  }
+  .mermaid { display: flex; justify-content: center; }
+  footer { margin-top: 64px; color: var(--sub); font-size: 13px; text-align: center; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #eef0f6; --sub: #9aa2b1; --line: #2a2e3a; --bg: #14161f; --panel: #1b1e29; --accent: #6f93ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #eef0f6; --sub: #9aa2b1; --line: #2a2e3a; --bg: #14161f; --panel: #1b1e29; --accent: #6f93ff;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>项目介绍</h1>
+  <p class="lede">一套 24 小时自动运行的黄金(XAUUSD)交易信号助手:一边把交易策略触发的警报邮件自动转发到 Telegram,一边独立按同一套策略规则重新计算每一次进出场,记录完整的止盈、止损结果,方便随时回顾这套策略的历史表现。</p>
+
+  <h2>主要功能</h2>
+  <ul class="features">
+    <li><b>实时警报转发</b>——策略在 TradingView 上触发警报后,系统会自动收信并转发到 Telegram,不需要人工盯盘。</li>
+    <li><b>独立信号复核引擎</b>——系统会自己抓取实时黄金行情,按策略规则判断进场时机,并全程追踪每一笔信号是止盈、止损、被反向信号平仓,还是因为开仓太久被自动放弃。</li>
+    <li><b>Telegram 即时通知</b>——每次出现新信号、每次止盈/止损/平仓,都会第一时间推送消息。</li>
+    <li><b>密码保护的监控看板</b>——一个网页,随时查看系统是否正常运行、最近收到了哪些警报。</li>
+    <li><b>历史数据导出</b>——可以导出全部信号记录,以及一份整体的胜率统计。</li>
+    <li><b>自动化运维</b>——每 5 分钟自动巡检一次系统是否还活着,每周自动备份一次历史数据,即使服务器重启也不会丢失记录。</li>
+  </ul>
+
+  <h2>技术栈</h2>
+  <table>
+    <tr><th>技术</th><th>作用</th></tr>
+    <tr><td>Python + FastAPI</td><td>系统的运行引擎,负责定时任务、网页和数据接口</td></tr>
+    <tr><td>Twelve Data</td><td>提供实时黄金价格数据的行情服务</td></tr>
+    <tr><td>Telegram Bot</td><td>把交易信号实时推送到 Telegram</td></tr>
+    <tr><td>Gmail</td><td>代收策略平台发来的警报邮件</td></tr>
+    <tr><td>Supabase(云端数据库)</td><td>永久保存历史信号记录,服务器重启也不会丢数据</td></tr>
+    <tr><td>Render</td><td>系统实际运行的云端服务器,不需要自己买/管主机</td></tr>
+    <tr><td>GitHub Actions</td><td>每 5 分钟自动巡检一次系统、每周自动备份一次数据</td></tr>
+  </table>
+
+  <h2>系统架构</h2>
+  <div class="diagram">
+    <pre class="mermaid">
+graph TD
+    A[TradingView 策略警报] -->|警报邮件| B[邮箱收信]
+    C[黄金行情数据源] --> D[核心处理服务]
+    B --> D
+    E[定时巡检] -->|每5分钟触发| D
+    D --> F[历史数据库]
+    D --> G[Telegram 通知]
+    D --> H[监控看板]
+    </pre>
+  </div>
+
+  <h2>核心流程</h2>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TD
+    A[系统定时获取最新黄金行情] --> B{出现新的进场信号?}
+    B -->|是| C[记录信号并推送通知]
+    B -->|否| D[检查所有持仓中的信号]
+    C --> D
+    D --> E{触及止盈/止损/反向/超时?}
+    E -->|是| F[记录结果并推送通知]
+    E -->|否| G[等待下一次巡检]
+    F --> H[更新历史记录与胜率统计]
+    </pre>
+  </div>
+
+  <footer>本页内容基于项目实际代码整理,不含任何密钥、密码或内部网址。</footer>
+</div>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+</script>
+</body>
+</html>
