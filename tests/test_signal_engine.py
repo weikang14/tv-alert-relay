@@ -1,6 +1,9 @@
 # tests/test_signal_engine.py
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+import pytest
 
 import db as db_module
 from market_data import Bar, MarketDataError
@@ -8,13 +11,17 @@ from signal_engine import (
     BUCKET_MINUTES,
     CHART_TIMEFRAME_MINUTES,
     INT_RES,
+    TIMEOUT_HOURS,
     _bucket_candles,
     _bucket_start,
+    _trading_hours_open,
     bucket_samples,
     detect_entries,
     evaluate_signal,
     poll_once,
 )
+
+_NY = ZoneInfo("America/New_York")
 
 # A fixed, always-bucket-aligned reference point, derived from the production
 # _bucket_start() itself so every test below stays correct regardless of the
@@ -88,6 +95,21 @@ def test_bucket_start_session_boundary_flips_exactly_at_5pm_new_york():
     assert _bucket_start(before) == datetime(2026, 7, 1, 19, 0, tzinfo=timezone.utc)
     after = datetime(2026, 7, 1, 21, 1, tzinfo=timezone.utc)  # 17:01 EDT: new session's first bucket
     assert _bucket_start(after) == datetime(2026, 7, 1, 21, 0, tzinfo=timezone.utc)
+
+
+# --- _trading_hours_open: real trading time elapsed, weekend excluded ---
+
+def test_trading_hours_open_within_a_single_trading_day():
+    entry = datetime(2026, 9, 23, 9, 0, tzinfo=_NY)  # Wednesday
+    now = datetime(2026, 9, 23, 15, 0, tzinfo=_NY)  # same day, 6h later
+    assert _trading_hours_open(entry, now) == pytest.approx(6.0)
+
+
+def test_trading_hours_open_excludes_the_full_weekend_closure():
+    entry = datetime(2026, 9, 25, 10, 0, tzinfo=_NY)  # Friday, before the 17:00 close
+    now = datetime(2026, 9, 28, 10, 0, tzinfo=_NY)  # Monday, same time-of-day
+    # 3 real days (72h) minus the 48h Friday-17:00 -> Sunday-17:00 closure = 24h
+    assert _trading_hours_open(entry, now) == pytest.approx(24.0)
 
 
 # --- _bucket_candles / bucket_samples: aggregation on native bucket OHLC ---
@@ -586,3 +608,39 @@ def test_poll_once_suppresses_push_but_still_records_stale_entries_on_bootstrap(
     assert len(rows) == 1
     assert rows[0]["direction"] == "long"
     assert not fake_send.called
+
+
+def test_poll_once_times_out_signal_open_past_threshold_with_no_new_bars():
+    # The timeout sweep is a wall-clock decision, not a bar-driven one — it
+    # must still run on a poll that finds no new market data.
+    conn = db_module.connect("sqlite:///:memory:")
+    entry_time = _ANCHOR - timedelta(hours=TIMEOUT_HOURS + 1)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 99.9)
+    with patch("signal_engine.fetch_recent_bars", return_value=[]), \
+         patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=_ANCHOR)
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "TIMES_UP"
+    assert rows[0]["exited_at"] == _ANCHOR.isoformat()
+    assert not fake_send.called  # no push for a timeout closure
+
+
+def test_poll_once_times_out_signal_at_its_reached_tier():
+    conn = db_module.connect("sqlite:///:memory:")
+    entry_time = _ANCHOR - timedelta(hours=TIMEOUT_HOURS + 1)
+    signal_id = db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 99.9)
+    db_module.update_signal(conn, signal_id, 1, "OPEN", None, 100.1, 99.9)
+    with patch("signal_engine.fetch_recent_bars", return_value=[]):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=_ANCHOR)
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "TP1_THEN_TIMES_UP"
+
+
+def test_poll_once_keeps_signal_open_when_under_timeout_threshold():
+    conn = db_module.connect("sqlite:///:memory:")
+    entry_time = _ANCHOR - timedelta(hours=TIMEOUT_HOURS - 1)
+    db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 99.9)
+    with patch("signal_engine.fetch_recent_bars", return_value=[]):
+        poll_once(conn, "key", "XAU/USD", "tok", "chat", now=_ANCHOR)
+    rows = db_module.recent_signals(conn)
+    assert rows[0]["status"] == "OPEN"

@@ -29,6 +29,13 @@ ALMA_SIGMA = 5
 TP_LEVELS_PCT = [0.2, 0.35, 0.45]
 SL_PCT = 0.1
 
+# Give up on a signal that's been open this many TRADING hours (the standard
+# Friday-17:00 -> Sunday-17:00 America/New_York forex/gold weekly closure is
+# excluded from this count, so a position opened right before the weekend
+# isn't unfairly abandoned just because the market happened to be shut) —
+# see design spec section 5, point 8.
+TIMEOUT_HOURS = 6
+
 # The exchange's trading "day" (and therefore every higher-timeframe bar,
 # including the intRes bucket the real script reads via request.security)
 # starts at 17:00 America/New_York, not UTC midnight — confirmed against the
@@ -71,6 +78,37 @@ def _bucket_start(dt: datetime) -> datetime:
     elapsed_seconds = (dt - session_start_utc).total_seconds()
     bucket_index = int(elapsed_seconds // (BUCKET_MINUTES * 60))
     return session_start_utc + timedelta(minutes=bucket_index * BUCKET_MINUTES)
+
+
+def _weekend_closure_seconds(start: datetime, end: datetime) -> float:
+    """Total seconds of the standard forex/gold weekly closure (Friday
+    17:00 -> Sunday 17:00 America/New_York) that fall within [start, end]."""
+    start_ny = start.astimezone(_SESSION_TZ)
+    days_since_friday = (start_ny.weekday() - 4) % 7  # Monday=0 .. Sunday=6, Friday=4
+    friday_1700 = start_ny.replace(hour=_SESSION_START_HOUR, minute=0, second=0, microsecond=0)
+    friday_1700 -= timedelta(days=days_since_friday)
+    if friday_1700 > start_ny:
+        friday_1700 -= timedelta(days=7)
+
+    total = 0.0
+    while True:
+        closure_start = friday_1700.astimezone(timezone.utc)
+        if closure_start > end:
+            break
+        closure_end = closure_start + timedelta(hours=48)
+        overlap_start = max(closure_start, start)
+        overlap_end = min(closure_end, end)
+        if overlap_end > overlap_start:
+            total += (overlap_end - overlap_start).total_seconds()
+        friday_1700 += timedelta(days=7)
+    return total
+
+
+def _trading_hours_open(entry_time: datetime, now: datetime) -> float:
+    """Wall-clock hours between entry_time and now, minus any weekend
+    closure that fell within that span."""
+    elapsed_seconds = (now - entry_time).total_seconds() - _weekend_closure_seconds(entry_time, now)
+    return elapsed_seconds / 3600
 
 
 def _bucket_candles(bars: list[Bar]) -> list[tuple[datetime, float, float, datetime, float, float]]:
@@ -153,6 +191,7 @@ def detect_entries(samples: list) -> list[EntrySignal]:
 
 _STATUS_AFTER_SL = {0: "SL_ONLY", 1: "TP1_THEN_SL", 2: "TP2_THEN_SL"}
 _STATUS_AFTER_REVERSAL = {0: "REVERSED_ONLY", 1: "TP1_THEN_REVERSED", 2: "TP2_THEN_REVERSED"}
+_STATUS_AFTER_TIMEOUT = {0: "TIMES_UP", 1: "TP1_THEN_TIMES_UP", 2: "TP2_THEN_TIMES_UP"}
 
 
 def evaluate_signal(
@@ -233,6 +272,25 @@ def _evaluate_open_signals(conn, bars_segment: list[Bar], now: datetime, tg_bot_
             db.update_signal(conn, sig["id"], new_tier, "OPEN", None, new_prev_high, new_prev_low)
 
 
+def _apply_timeouts(conn, now: datetime) -> None:
+    """Gives up on anything still OPEN past TIMEOUT_HOURS of real trading
+    time — abandons it at whatever tier it's currently at, tagged TIMES_UP
+    (not TP_FULL/SL_ONLY), so it doesn't sit OPEN forever. A wall-clock
+    decision, not a bar-driven one: callers must run this even on a poll
+    that finds no new bars. No Telegram push: by definition every TIMES_UP
+    closure is already hours old by the time it's noticed, so there's no
+    "just happened" moment worth a real-time notification for (unlike
+    TP/SL/reversal, which fire on the very bar the price crossed)."""
+    for sig in db.open_signals(conn):
+        entry_time = datetime.fromisoformat(sig["entry_time"])
+        if _trading_hours_open(entry_time, now) > TIMEOUT_HOURS:
+            timeout_status = _STATUS_AFTER_TIMEOUT[sig["highest_tier"]]
+            db.update_signal(
+                conn, sig["id"], sig["highest_tier"], timeout_status, now.isoformat(),
+                sig["last_bar_high"], sig["last_bar_low"],
+            )
+
+
 def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: str, now: datetime | None = None) -> None:
     if not api_key:
         return
@@ -269,6 +327,7 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
         bars = [b for b in fetched if last_bar_time is None or b.time > last_bar_time]
 
         if not bars:
+            _apply_timeouts(conn, now)
             log.info("signal poll: no new bars")
             return
 
@@ -360,6 +419,11 @@ def poll_once(conn, api_key: str, symbol: str, tg_bot_token: str, tg_chat_id: st
         # Final TP/SL pass for whatever's still open, using any bars after
         # the last entry (or all of `bars`, when this poll had no entries).
         _evaluate_open_signals(conn, bars[bar_cursor:], now, tg_bot_token, tg_chat_id)
+
+        # Runs after entries/reversals: a fresh reversal is a more
+        # informative outcome than a generic timeout, so it takes priority
+        # when a signal is old enough for both to apply in the same poll.
+        _apply_timeouts(conn, now)
 
         if new_samples:
             last_sample = new_samples[-1]

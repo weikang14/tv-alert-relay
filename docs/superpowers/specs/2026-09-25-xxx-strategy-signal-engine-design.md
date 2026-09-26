@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS signals (
     highest_tier INTEGER NOT NULL DEFAULT 0,  -- 0=尚未中任何TP, 1/2/3=已到TP1/2/3
     status TEXT NOT NULL DEFAULT 'OPEN',      -- OPEN | SL_ONLY | TP1_THEN_SL | TP2_THEN_SL | TP3_FULL
                                                -- | REVERSED_ONLY | TP1_THEN_REVERSED | TP2_THEN_REVERSED
+                                               -- | TIMES_UP | TP1_THEN_TIMES_UP | TP2_THEN_TIMES_UP
     exited_at TEXT,                   -- ISO8601 UTC(出场那根 K 线的时间,不是轮询时间),OPEN 时为 NULL
     last_bar_high REAL,                -- 上一次评估到的 K 线高点(穿越判断要用,见第五节第 3 点)
     last_bar_low REAL                  -- 上一次评估到的 K 线低点
@@ -151,10 +152,11 @@ CREATE TABLE IF NOT EXISTS signal_status (
 桶"的原始开收和 ALMA 值都已经不在这批新数据里(是上一轮处理过的)——所以必须
 把上一次算出来的桶蜡烛开收 + ALMA 值都存下来,下一轮取出来接着用。
 
-`胜率 = status IN ('TP1_THEN_SL','TP2_THEN_SL','TP3_FULL','TP1_THEN_REVERSED','TP2_THEN_REVERSED')
-的笔数 / 已结束(status != 'OPEN')的总笔数`——即"至少摸到过 TP1"算赢,纯 `SL_ONLY`
-或纯 `REVERSED_ONLY`(没摸到任何 TP 就被反向信号平仓)算输。`/signals/export`
-同时返回完整结局分布,不只是这一个汇总数字。
+`胜率 = status IN ('TP1_THEN_SL','TP2_THEN_SL','TP3_FULL','TP1_THEN_REVERSED','TP2_THEN_REVERSED',
+'TP1_THEN_TIMES_UP','TP2_THEN_TIMES_UP') 的笔数 / 已结束(status != 'OPEN')的总笔数`——即
+"至少摸到过 TP1"算赢,纯 `SL_ONLY`、纯 `REVERSED_ONLY`、纯 `TIMES_UP`(没摸到任何 TP 就
+分别被止损/反向信号/超时弃单结束)算输。`/signals/export` 同时返回完整结局分布,不只是
+这一个汇总数字。
 
 ## 五、关键实现细节(容易出偏差的地方)
 
@@ -250,6 +252,29 @@ CREATE TABLE IF NOT EXISTS signal_status (
    模拟也测不出来,因为模拟数据本身也是按错误基准生成的——只有拿到真实图表
    数据做对比才能发现。修正前的偏移量恒定错误 1-2 小时,会让入场信号的桶边界、
    从而 ALMA 交叉的判定时机整体偏移,是本项目里影响面最广的一处已确认修正。
+8. **超时弃单(2026-09-26 新增,用户主动要求的额外机制,不是复刻 Pine 脚本本身
+   的行为)**:脚本本身没有"持仓太久就放弃"这个概念,但实盘运行中一笔信号如果
+   长期既不中 TP/SL 也没被反向信号平仓,会一直挂在 `OPEN` 状态,污染胜率统计。
+   新增规则:一笔信号如果**真实交易时间**(不含周末休市)超过 `TIMEOUT_HOURS`
+   (当前设为 6 小时)还没结束,就在当前已到的那一级强制弃单,状态记为
+   `TIMES_UP`/`TP1_THEN_TIMES_UP`/`TP2_THEN_TIMES_UP`,胜率统计逻辑跟
+   `REVERSED` 系列一致(已到 TP1 算赢,纯 `TIMES_UP` 算输)。"真实交易时间"用
+   `_trading_hours_open()` 计算:总经过时间减去期间落在外汇/黄金标准周末休市
+   窗口(纽约时间周五 17:00 → 周日 17:00,复用第五节第 7 点确认的同一个交易日
+   起点定义)内的部分,避免一笔刚好横跨周末的信号被不公平地判定为"拖太久"。
+   这个检查是纯粹的钟表时间判断,不依赖当轮是否拉到新 K 线,所以即使某次轮询
+   没有新数据也照样会跑(否则遇到轮询短暂拉不到新数据,弃单判定会被延后);
+   同一轮里如果一笔信号同时符合"超时"和"被反向信号平仓"两个条件,反向平仓
+   优先(信息量更大,只有反向平仓没发生时才退回到超时弃单这个兜底机制)。
+   超时弃单不推送 Telegram 通知——按定义,发现的时候都已经"迟到"至少
+   `TIMEOUT_HOURS`,没有"刚发生"这个时间点值得实时通知,不像 TP/SL/反向都是
+   在价格真正穿越的那根 K 线上触发。
+9. **周末休市不需要额外的"暂停追踪"逻辑**:轮询每次只处理"自上次以来的新
+   K 线",周末休市期间 Twelve Data 本来就不会返回新收盘的 K 线,`bars` 会是
+   空列表,`poll_once()` 直接判定"无新 K 线"提前返回,不会做任何多余的处理或
+   浪费额度——周末的"不追踪"是这个既有机制的自然结果,不需要单独写代码判断
+   "现在是不是周末"。真正需要处理周末的地方只有第 8 点的超时弃单计算,因为
+   那是钟表时间的累计,周末不排除的话会把休市的 48 小时也算进"拖了多久"里。
 
 ## 六、错误处理
 
@@ -271,6 +296,12 @@ CREATE TABLE IF NOT EXISTS signal_status (
   - 同一根 K 线内 TP 和 SL 都命中时,优先记 TP
   - 状态机正确推进到 `TP3_FULL`,或在任一环节提前 `*_THEN_SL`/`SL_ONLY` 退出
   - `last_bar_time` 正确推进,不重复处理已处理过的 K 线
+  - `_trading_hours_open()` 正确排除周末休市窗口(跨周末 vs 不跨周末两种情况)
+  - 超时弃单:超过 `TIMEOUT_HOURS` 的信号在当前已到的那一级被记为
+    `TIMES_UP`/`TPn_THEN_TIMES_UP`;未超时的信号保持 `OPEN`;没有新 K 线的
+    轮询也会正确触发超时弃单检查
+- `main.py`:`/signals/export` 的胜率统计正确把 `TP1_THEN_TIMES_UP`/
+  `TP2_THEN_TIMES_UP` 算作赢,纯 `TIMES_UP` 算输
 - `market_data.py`:mock Twelve Data 的 HTTP 响应,测试限流(429)、超时、
   返回格式异常(缺字段/空数组)时的处理路径。
 - `main.py`:`/signals/export` 无认证 → 401;有认证 → 正确返回 JSON,含结局分布

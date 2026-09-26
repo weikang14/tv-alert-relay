@@ -163,6 +163,7 @@ def export_signals(conn=Depends(get_db), _auth: None = Depends(check_auth)):
     closed = [s for s in signals if s["status"] != "OPEN"]
     wins = [s for s in closed if s["status"] in (
         "TP1_THEN_SL", "TP2_THEN_SL", "TP3_FULL", "TP1_THEN_REVERSED", "TP2_THEN_REVERSED",
+        "TP1_THEN_TIMES_UP", "TP2_THEN_TIMES_UP",
     )]
     distribution: dict[str, int] = {}
     for s in signals:
