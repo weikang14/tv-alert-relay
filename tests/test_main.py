@@ -31,7 +31,7 @@ def clear_overrides():
 
 def test_dashboard_requires_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/")
     assert resp.status_code == 401
@@ -39,7 +39,7 @@ def test_dashboard_requires_auth():
 
 def test_dashboard_rejects_wrong_password():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/", auth=("admin", "wrong"))
     assert resp.status_code == 401
@@ -47,7 +47,7 @@ def test_dashboard_rejects_wrong_password():
 
 def test_dashboard_ok_with_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/", auth=("admin", "secret"))
     assert resp.status_code == 200
@@ -56,14 +56,14 @@ def test_dashboard_ok_with_auth():
 
 def test_healthz_unhealthy_before_first_poll():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/healthz")
     assert resp.status_code == 500
 
 
 def test_healthz_healthy_after_success():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.record_poll(conn, success=True)
     app.dependency_overrides[get_config] = lambda: make_cfg()
     app.dependency_overrides[get_db] = lambda: conn
@@ -73,7 +73,7 @@ def test_healthz_healthy_after_success():
 
 
 def test_healthz_requires_secret_when_configured():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.record_poll(conn, success=True)
     app.dependency_overrides[get_config] = lambda: make_cfg(healthz_shared_secret="s3cret")
     app.dependency_overrides[get_db] = lambda: conn
@@ -86,14 +86,14 @@ def test_healthz_requires_secret_when_configured():
 
 def test_poll_requires_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.post("/poll")
     assert resp.status_code == 401
 
 
 def test_poll_triggers_poll_once_and_returns_healthy(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     calls = []
 
     def fake_poll_once(conn_arg, imap_host, gmail_user, gmail_app_password, tv_sender, tg_bot_token, tg_chat_id):
@@ -111,7 +111,7 @@ def test_poll_triggers_poll_once_and_returns_healthy(monkeypatch):
 
 
 def test_poll_returns_500_when_unhealthy_after_failures(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
 
     def fake_poll_once(conn_arg, *args):
         db_module.record_poll(conn_arg, success=False)
@@ -127,7 +127,7 @@ def test_poll_returns_500_when_unhealthy_after_failures(monkeypatch):
 
 
 def test_poll_lock_prevents_concurrent_execution(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     concurrent = {"count": 0, "max": 0}
     counter_lock = threading.Lock()
 
@@ -155,7 +155,7 @@ def test_poll_lock_prevents_concurrent_execution(monkeypatch):
 
 def test_export_requires_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/export")
     assert resp.status_code == 401
@@ -163,7 +163,7 @@ def test_export_requires_auth():
 
 def test_export_returns_empty_list_when_no_alerts():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/export", auth=("admin", "secret"))
     assert resp.status_code == 200
@@ -173,7 +173,7 @@ def test_export_returns_empty_list_when_no_alerts():
 
 
 def test_export_returns_all_alerts_as_json():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.insert_alert(conn, "Subj1", "Body1", True, None)
     db_module.insert_alert(conn, "Subj2", "Body2", False, "boom")
     app.dependency_overrides[get_config] = lambda: make_cfg()
@@ -193,14 +193,14 @@ def test_export_returns_all_alerts_as_json():
 
 def test_signals_export_requires_auth():
     app.dependency_overrides[get_config] = lambda: make_cfg()
-    app.dependency_overrides[get_db] = lambda: db_module.connect(":memory:")
+    app.dependency_overrides[get_db] = lambda: db_module.connect("sqlite:///:memory:")
     client = TestClient(app)
     resp = client.get("/signals/export")
     assert resp.status_code == 401
 
 
 def test_signals_export_returns_summary_and_distribution():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00", 100.1, 99.9)
     db_module.update_signal(conn, 1, 3, "TP3_FULL", "2026-09-25T10:40:00+00:00", 100.5, 100.3)
     db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00", 100.1, 99.9)
@@ -220,7 +220,7 @@ def test_signals_export_returns_summary_and_distribution():
 
 
 def test_signals_export_counts_reversed_after_tp_as_a_win():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.insert_signal(conn, "long", 100.0, "2026-09-25T10:15:00+00:00", 100.1, 99.9)
     db_module.update_signal(conn, 1, 1, "TP1_THEN_REVERSED", "2026-09-25T10:40:00+00:00", 100.5, 100.3)
     db_module.insert_signal(conn, "short", 100.0, "2026-09-25T11:15:00+00:00", 100.1, 99.9)
@@ -236,7 +236,7 @@ def test_signals_export_counts_reversed_after_tp_as_a_win():
 
 
 def test_poll_route_triggers_signal_engine_alongside_gmail_poll(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     calls = []
 
     def fake_poll_once(conn_arg, *args):
@@ -256,7 +256,7 @@ def test_poll_route_triggers_signal_engine_alongside_gmail_poll(monkeypatch):
 
 
 def test_poll_route_survives_signal_engine_exception(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
 
     def fake_poll_once(conn_arg, *args):
         db_module.record_poll(conn_arg, success=True)

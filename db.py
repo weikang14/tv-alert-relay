@@ -1,160 +1,196 @@
-import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    received_at TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    body_snippet TEXT NOT NULL,
-    sent_ok INTEGER NOT NULL,
-    error TEXT
-);
+from sqlalchemy import CheckConstraint, Column, Float, Integer, MetaData, String, Table, create_engine, insert, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 
-CREATE TABLE IF NOT EXISTS status (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    last_poll_at TEXT,
-    last_success_at TEXT,
-    consecutive_errors INTEGER NOT NULL DEFAULT 0
-);
+metadata = MetaData()
 
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    direction TEXT NOT NULL,
-    entry_price REAL NOT NULL,
-    entry_time TEXT NOT NULL,
-    entry_high REAL NOT NULL,
-    entry_low REAL NOT NULL,
-    highest_tier INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'OPEN',
-    exited_at TEXT,
-    last_bar_high REAL,
-    last_bar_low REAL
-);
+alerts = Table(
+    "alerts", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("received_at", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("body_snippet", String, nullable=False),
+    Column("sent_ok", Integer, nullable=False),
+    Column("error", String),
+)
 
-CREATE TABLE IF NOT EXISTS signal_status (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    last_bar_time TEXT,
-    last_bucket_start TEXT,
-    last_bucket_open REAL,
-    last_bucket_close REAL,
-    last_bucket_alma_close REAL,
-    last_bucket_alma_open REAL
-);
-"""
+status = Table(
+    "status", metadata,
+    Column("id", Integer, primary_key=True),
+    CheckConstraint("id = 1"),
+    Column("last_poll_at", String),
+    Column("last_success_at", String),
+    Column("consecutive_errors", Integer, nullable=False, server_default="0"),
+)
 
+signals = Table(
+    "signals", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("direction", String, nullable=False),
+    Column("entry_price", Float, nullable=False),
+    Column("entry_time", String, nullable=False),
+    Column("entry_high", Float, nullable=False),
+    Column("entry_low", Float, nullable=False),
+    Column("highest_tier", Integer, nullable=False, server_default="0"),
+    Column("status", String, nullable=False, server_default="OPEN"),
+    Column("exited_at", String),
+    Column("last_bar_high", Float),
+    Column("last_bar_low", Float),
+)
 
-def connect(db_path: str) -> sqlite3.Connection:
-    # ponytail: FastAPI runs sync route handlers in worker threads, so the
-    # single long-lived connection is used across threads; SQLite's C library
-    # is thread-safe (serialized) by default, only Python's own same-thread
-    # guard needs disabling here.
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    conn.execute("INSERT OR IGNORE INTO status (id, consecutive_errors) VALUES (1, 0)")
-    conn.execute("INSERT OR IGNORE INTO signal_status (id) VALUES (1)")
-    conn.commit()
-    return conn
+signal_status = Table(
+    "signal_status", metadata,
+    Column("id", Integer, primary_key=True),
+    CheckConstraint("id = 1"),
+    Column("last_bar_time", String),
+    Column("last_bucket_start", String),
+    Column("last_bucket_open", Float),
+    Column("last_bucket_close", Float),
+    Column("last_bucket_alma_close", Float),
+    Column("last_bucket_alma_open", Float),
+)
 
 
-def insert_alert(conn: sqlite3.Connection, subject: str, body_snippet: str, sent_ok: bool, error: str | None) -> None:
-    conn.execute(
-        "INSERT INTO alerts (received_at, subject, body_snippet, sent_ok, error) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(), subject, body_snippet, int(sent_ok), error),
-    )
-    conn.commit()
+def _normalize_url(url: str) -> str:
+    # Supabase/Render dashboards hand out plain postgres:// or postgresql://
+    # connection strings — SQLAlchemy needs the driver named explicitly.
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
 
 
-def recent_alerts(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
-    return conn.execute(
-        "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
-
-
-def record_poll(conn: sqlite3.Connection, success: bool) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    if success:
-        conn.execute(
-            "UPDATE status SET last_poll_at = ?, last_success_at = ?, consecutive_errors = 0 WHERE id = 1",
-            (now, now),
-        )
+def connect(url: str) -> Engine:
+    url = _normalize_url(url)
+    if url.startswith("sqlite"):
+        # A SQLite in-memory database is per-connection: without StaticPool,
+        # the pool would hand out a fresh (empty) database on every checkout.
+        # check_same_thread=False mirrors the app's single-Engine-shared-
+        # across-worker-threads usage (FastAPI runs sync handlers in threads).
+        engine = create_engine(url, connect_args={"check_same_thread": False}, poolclass=StaticPool)
     else:
-        conn.execute(
-            "UPDATE status SET last_poll_at = ?, consecutive_errors = consecutive_errors + 1 WHERE id = 1",
-            (now,),
-        )
-    conn.commit()
+        engine = create_engine(url)
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        if conn.execute(select(status.c.id).where(status.c.id == 1)).first() is None:
+            conn.execute(insert(status).values(id=1, consecutive_errors=0))
+        if conn.execute(select(signal_status.c.id).where(signal_status.c.id == 1)).first() is None:
+            conn.execute(insert(signal_status).values(id=1))
+    return engine
 
 
-def get_status(conn: sqlite3.Connection) -> sqlite3.Row:
-    return conn.execute("SELECT * FROM status WHERE id = 1").fetchone()
+def insert_alert(engine: Engine, subject: str, body_snippet: str, sent_ok: bool, error: str | None) -> None:
+    with engine.begin() as conn:
+        conn.execute(insert(alerts).values(
+            received_at=datetime.now(timezone.utc).isoformat(),
+            subject=subject, body_snippet=body_snippet, sent_ok=int(sent_ok), error=error,
+        ))
+
+
+def recent_alerts(engine: Engine, limit: int = 50) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(select(alerts).order_by(alerts.c.id.desc()).limit(limit)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def record_poll(engine: Engine, success: bool) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as conn:
+        if success:
+            conn.execute(
+                update(status).where(status.c.id == 1)
+                .values(last_poll_at=now, last_success_at=now, consecutive_errors=0)
+            )
+        else:
+            conn.execute(
+                update(status).where(status.c.id == 1)
+                .values(last_poll_at=now, consecutive_errors=status.c.consecutive_errors + 1)
+            )
+
+
+def get_status(engine: Engine) -> dict | None:
+    with engine.connect() as conn:
+        row = conn.execute(select(status).where(status.c.id == 1)).mappings().first()
+    return dict(row) if row is not None else None
 
 
 def insert_signal(
-    conn: sqlite3.Connection, direction: str, entry_price: float, entry_time: str,
+    engine: Engine, direction: str, entry_price: float, entry_time: str,
     entry_high: float, entry_low: float,
 ) -> int:
-    cur = conn.execute(
-        "INSERT INTO signals (direction, entry_price, entry_time, entry_high, entry_low, "
-        "highest_tier, status, last_bar_high, last_bar_low) "
-        "VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)",
-        (direction, entry_price, entry_time, entry_high, entry_low, entry_high, entry_low),
-    )
-    conn.commit()
-    return cur.lastrowid
+    with engine.begin() as conn:
+        result = conn.execute(
+            insert(signals).values(
+                direction=direction, entry_price=entry_price, entry_time=entry_time,
+                entry_high=entry_high, entry_low=entry_low, highest_tier=0, status="OPEN",
+                last_bar_high=entry_high, last_bar_low=entry_low,
+            ).returning(signals.c.id)
+        )
+        return result.scalar_one()
 
 
-def open_signals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM signals WHERE status = 'OPEN' ORDER BY id").fetchall()
+def open_signals(engine: Engine) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(signals).where(signals.c.status == "OPEN").order_by(signals.c.id)
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def update_signal(
-    conn: sqlite3.Connection, signal_id: int, highest_tier: int, status: str, exited_at: str | None,
+    engine: Engine, signal_id: int, highest_tier: int, status_value: str, exited_at: str | None,
     last_bar_high: float, last_bar_low: float,
 ) -> None:
-    conn.execute(
-        "UPDATE signals SET highest_tier = ?, status = ?, exited_at = ?, "
-        "last_bar_high = ?, last_bar_low = ? WHERE id = ?",
-        (highest_tier, status, exited_at, last_bar_high, last_bar_low, signal_id),
-    )
-    conn.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            update(signals).where(signals.c.id == signal_id).values(
+                highest_tier=highest_tier, status=status_value, exited_at=exited_at,
+                last_bar_high=last_bar_high, last_bar_low=last_bar_low,
+            )
+        )
 
 
-def recent_signals(conn: sqlite3.Connection, limit: int = 100000) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+def recent_signals(engine: Engine, limit: int = 100000) -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(select(signals).order_by(signals.c.id.desc()).limit(limit)).mappings().all()
+    return [dict(r) for r in rows]
 
 
-def get_last_bar_time(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute("SELECT last_bar_time FROM signal_status WHERE id = 1").fetchone()
-    return row["last_bar_time"] if row else None
+def get_last_bar_time(engine: Engine) -> str | None:
+    with engine.connect() as conn:
+        row = conn.execute(select(signal_status.c.last_bar_time).where(signal_status.c.id == 1)).first()
+    return row[0] if row is not None else None
 
 
-def set_last_bar_time(conn: sqlite3.Connection, value: str) -> None:
-    conn.execute("UPDATE signal_status SET last_bar_time = ? WHERE id = 1", (value,))
-    conn.commit()
+def set_last_bar_time(engine: Engine, value: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(update(signal_status).where(signal_status.c.id == 1).values(last_bar_time=value))
 
 
-def get_last_bucket_carry(conn: sqlite3.Connection) -> tuple[str, float, float, float, float] | None:
-    row = conn.execute(
-        "SELECT last_bucket_start, last_bucket_open, last_bucket_close, "
-        "last_bucket_alma_close, last_bucket_alma_open FROM signal_status WHERE id = 1"
-    ).fetchone()
-    if row is None or row["last_bucket_start"] is None:
+def get_last_bucket_carry(engine: Engine) -> tuple[str, float, float, float, float] | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                signal_status.c.last_bucket_start, signal_status.c.last_bucket_open,
+                signal_status.c.last_bucket_close, signal_status.c.last_bucket_alma_close,
+                signal_status.c.last_bucket_alma_open,
+            ).where(signal_status.c.id == 1)
+        ).first()
+    if row is None or row[0] is None:
         return None
-    return (
-        row["last_bucket_start"], row["last_bucket_open"], row["last_bucket_close"],
-        row["last_bucket_alma_close"], row["last_bucket_alma_open"],
-    )
+    return tuple(row)
 
 
 def set_last_bucket_carry(
-    conn: sqlite3.Connection, bucket_start: str, bucket_open: float, bucket_close: float,
+    engine: Engine, bucket_start: str, bucket_open: float, bucket_close: float,
     alma_close: float, alma_open: float,
 ) -> None:
-    conn.execute(
-        "UPDATE signal_status SET last_bucket_start = ?, last_bucket_open = ?, last_bucket_close = ?, "
-        "last_bucket_alma_close = ?, last_bucket_alma_open = ? WHERE id = 1",
-        (bucket_start, bucket_open, bucket_close, alma_close, alma_open),
-    )
-    conn.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            update(signal_status).where(signal_status.c.id == 1).values(
+                last_bucket_start=bucket_start, last_bucket_open=bucket_open, last_bucket_close=bucket_close,
+                last_bucket_alma_close=alma_close, last_bucket_alma_open=alma_open,
+            )
+        )

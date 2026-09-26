@@ -5,3 +5,5 @@ requests
 pytest
 httpx
 tzdata
+sqlalchemy
+psycopg[binary]

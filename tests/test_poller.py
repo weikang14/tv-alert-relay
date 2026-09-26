@@ -35,7 +35,7 @@ def install_fake_imap(monkeypatch, emails):
 
 
 def test_poll_once_sends_and_records_success(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     fake_email = FetchedEmail(uid=b"1", raw=b"raw")
     created = install_fake_imap(monkeypatch, [fake_email])
     monkeypatch.setattr(poller_module, "parse_alert_email", lambda raw: ("Subject A", "Body A"))
@@ -54,7 +54,7 @@ def test_poll_once_sends_and_records_success(monkeypatch):
 
 
 def test_poll_once_records_failure_when_send_fails(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     fake_email = FetchedEmail(uid=b"1", raw=b"raw")
     created = install_fake_imap(monkeypatch, [fake_email])
     monkeypatch.setattr(poller_module, "parse_alert_email", lambda raw: ("Subject A", "Body A"))
@@ -71,7 +71,7 @@ def test_poll_once_records_failure_when_send_fails(monkeypatch):
 
 
 def test_poll_once_survives_imap_exception(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
 
     def raise_connect(host, user, pw):
         raise OSError("imap down")

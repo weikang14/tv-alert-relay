@@ -31,3 +31,5 @@ services:
         sync: false
       - key: SIGNAL_SYMBOL
         value: XAU/USD
+      - key: DATABASE_URL
+        sync: false

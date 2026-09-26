@@ -63,13 +63,13 @@ async def _poll_loop(cfg: Config, conn) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
-    conn = db_module.connect(cfg.db_path)
+    conn = db_module.connect(cfg.database_url or f"sqlite:///{cfg.db_path}")
     app.dependency_overrides[get_config] = lambda: cfg
     app.dependency_overrides[get_db] = lambda: conn
     task = asyncio.create_task(_poll_loop(cfg, conn))
     yield
     task.cancel()
-    conn.close()
+    conn.dispose()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

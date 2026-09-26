@@ -16,6 +16,7 @@ class Config:
     healthz_shared_secret: str
     twelve_data_api_key: str
     signal_symbol: str
+    database_url: str = ""
 
 
 def load_config() -> Config:
@@ -40,4 +41,6 @@ def load_config() -> Config:
         healthz_shared_secret=os.environ.get("HEALTHZ_SHARED_SECRET") or "",
         twelve_data_api_key=os.environ.get("TWELVE_DATA_API_KEY") or "",
         signal_symbol=os.environ.get("SIGNAL_SYMBOL") or "XAU/USD",
+        # Empty -> db_path (a local SQLite file) is used instead; see main.py.
+        database_url=os.environ.get("DATABASE_URL") or "",
     )

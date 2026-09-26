@@ -311,14 +311,14 @@ def test_evaluate_signal_no_change_when_no_bars_qualify():
 # --- poll_once orchestration ---
 
 def test_poll_once_noops_when_api_key_missing():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     with patch("signal_engine.fetch_recent_bars") as fake_fetch:
         poll_once(conn, "", "XAU/USD", "tok", "chat")
         fake_fetch.assert_not_called()
 
 
 def test_poll_once_bootstraps_with_200_bars_on_first_run():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch, \
          patch("signal_engine.send_telegram_message", return_value=(True, None)):
         poll_once(conn, "key", "XAU/USD", "tok", "chat")
@@ -326,7 +326,7 @@ def test_poll_once_bootstraps_with_200_bars_on_first_run():
 
 
 def test_poll_once_caps_outputsize_at_200_after_long_gap(monkeypatch):
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.set_last_bar_time(conn, "2026-01-01T00:00:00+00:00")  # far in the past
     with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch:
         poll_once(conn, "key", "XAU/USD", "tok", "chat")
@@ -338,7 +338,7 @@ def test_poll_once_outputsize_includes_full_bucket_margin():
     # poll gap alone is not enough margin either way: a bucket that closed
     # mid-gap still needs its true first bar in the fetch, which requires
     # reaching back a full bucket width (in bars), not just the gap.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     db_module.set_last_bar_time(conn, (_ANCHOR - timedelta(minutes=5)).isoformat())
     with patch("signal_engine.fetch_recent_bars", return_value=[]) as fake_fetch:
         poll_once(conn, "key", "XAU/USD", "tok", "chat", now=_ANCHOR)
@@ -347,7 +347,7 @@ def test_poll_once_outputsize_includes_full_bucket_margin():
 
 
 def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bars = _three_bucket_bullish_cross()
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
          patch("signal_engine.send_telegram_message", return_value=(True, None)) as fake_send:
@@ -365,7 +365,7 @@ def test_poll_once_detects_entry_pushes_telegram_and_records_signal():
 
 
 def test_poll_once_detects_entry_using_carried_over_bucket_sample():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bucket_b = _bucket_bars(1, 101, 101, 101, 100)
     db_module.set_last_bar_time(conn, bucket_b[-1].time.isoformat())
     # Carried bucket B: bearish (alma_close <= alma_open), raw open=101/close=100.
@@ -385,7 +385,7 @@ def test_poll_once_aggregates_bucket_from_full_fetch_not_filtered_bars():
     # bars were already seen in a prior poll gets the WRONG open (the
     # filtered slice's first bar, not the bucket's TRUE first bar),
     # corrupting the ALMA input and potentially flipping the result.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bucket_c = (
         [_bar_at(2, 0, 90, 101, 89, 100)]  # TRUE bucket open = 90
         + [_bar_at(2, i, 100, 101, 99, 100) for i in range(1, INT_RES - 1)]
@@ -405,7 +405,7 @@ def test_poll_once_aggregates_bucket_from_full_fetch_not_filtered_bars():
 def test_poll_once_ignores_not_yet_closed_bar():
     # Regression for C2: a bar whose period has not fully elapsed yet must
     # not be treated as final.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     entry_time = _ANCHOR
     db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 100.0)
     still_forming = _bar(1, 100, 100, 99.85, 99.9)  # would trigger SL if treated as final
@@ -418,7 +418,7 @@ def test_poll_once_ignores_not_yet_closed_bar():
 
 
 def test_poll_once_processes_bar_once_fully_closed():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     entry_time = _ANCHOR
     db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 100.0)
     sl_bar = _bar(1, 100, 100, 99.85, 99.9)
@@ -432,7 +432,7 @@ def test_poll_once_processes_bar_once_fully_closed():
 
 
 def test_poll_once_survives_telegram_failure_on_entry_push():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bars = _three_bucket_bullish_cross()
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
          patch("signal_engine.send_telegram_message", return_value=(False, "boom")):
@@ -441,14 +441,14 @@ def test_poll_once_survives_telegram_failure_on_entry_push():
 
 
 def test_poll_once_swallows_market_data_errors():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     with patch("signal_engine.fetch_recent_bars", side_effect=MarketDataError("boom")):
         poll_once(conn, "key", "XAU/USD", "tok", "chat")  # must not raise
     assert db_module.get_last_bar_time(conn) is None  # nothing advanced
 
 
 def test_poll_once_closes_open_signal_and_pushes_result():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     entry_time = _ANCHOR
     db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 100.0)
     sl_bar = _bar(1, 100, 100, 99.85, 99.9)  # crosses under SL (prev_low=100.0 > 99.9)
@@ -461,7 +461,7 @@ def test_poll_once_closes_open_signal_and_pushes_result():
 
 
 def test_poll_once_survives_telegram_failure_on_close_push():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     entry_time = _ANCHOR
     db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.1, 100.0)
     sl_bar = _bar(1, 100, 100, 99.85, 99.9)
@@ -473,7 +473,7 @@ def test_poll_once_survives_telegram_failure_on_close_push():
 
 
 def test_poll_once_advances_tier_without_closing_or_pushing():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     entry_time = _ANCHOR
     db_module.insert_signal(conn, "long", 100.0, entry_time.isoformat(), 100.0, 99.9)
     tp1_bar = _bar(1, 100, 100.25, 100, 100.2)  # crosses TP1 only (prev_high=100.0 < 100.2)
@@ -492,7 +492,7 @@ def test_poll_once_reverses_open_signal_on_opposite_entry():
     # Pine's strategy.entry() (pyramiding=0) reverses the position when an
     # opposite-direction trigger fires — the old signal must close (at
     # whatever tier it had reached) exactly when the new one opens.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     signal_id = db_module.insert_signal(
         conn, "long", 95.0, (_ANCHOR - timedelta(minutes=BUCKET_MINUTES * 5)).isoformat(), 95.1, 94.9,
     )
@@ -522,7 +522,7 @@ def test_poll_once_reverses_open_signal_on_opposite_entry():
 
 
 def test_poll_once_reversal_close_not_pushed_when_entry_is_stale():
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     signal_id = db_module.insert_signal(
         conn, "long", 95.0, (_ANCHOR - timedelta(minutes=BUCKET_MINUTES * 5)).isoformat(), 95.1, 94.9,
     )
@@ -551,7 +551,7 @@ def test_poll_once_evaluates_tp_sl_between_two_entries_in_the_same_poll():
     # against the bars between it and the next (reversing) entry — not
     # skipped straight to REVERSED_ONLY just because a later entry lands in
     # the same poll.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bucket0 = _bucket_bars(0, 101, 101, 101, 100)
     bucket1 = _bucket_bars(1, 101, 101, 101, 100)
     bucket2 = _bucket_bars(2, 100, 101, 100, 101)  # -> LONG entry: price=101, high=101, low=100
@@ -576,7 +576,7 @@ def test_poll_once_evaluates_tp_sl_between_two_entries_in_the_same_poll():
 def test_poll_once_suppresses_push_but_still_records_stale_entries_on_bootstrap():
     # I1: a bootstrap/long-outage backlog must not be PUSHED as if it just
     # happened, but must still be RECORDED for win-rate history.
-    conn = db_module.connect(":memory:")
+    conn = db_module.connect("sqlite:///:memory:")
     bars = _three_bucket_bullish_cross()
     frozen_now = _long_after(bars)
     with patch("signal_engine.fetch_recent_bars", return_value=bars), \
